@@ -21,7 +21,7 @@ var (
 
 const (
 	generatedContent = "gen-3f9a1c7e-not-for-logs"
-	actionID    = "action 0f6b2d; approved in the team review"
+	actionID         = "action 0f6b2d; approved in the team review"
 )
 
 func fixture(t *testing.T) (*Fake, Request, []Change) {
