@@ -89,6 +89,22 @@ type Remote interface {
 	Status(ctx context.Context, pr PullRequest) (Status, error)
 	// Merge merges the pull request as the person, refusing when the head is not pr.HeadSHA.
 	Merge(ctx context.Context, pr PullRequest) error
+	// FindPullRequest returns the open pull request whose head is head, and whether there is one.
+	FindPullRequest(ctx context.Context, repo Repository, head string) (PullRequest, bool, error)
+	// OpenDraftPullRequest is OpenPullRequest with the pull request opened as a draft.
+	OpenDraftPullRequest(ctx context.Context, repo Repository, head, base, title, body string) (PullRequest, error)
+	// EnableAutoMerge arms the remote's auto-merge on the pull request with the
+	// repository's merge method, so it lands once its reviews and checks pass.
+	// The caller's choice, never the module's default.
+	EnableAutoMerge(ctx context.Context, pr PullRequest) error
+	// Close closes the pull request without merging and, when asked, deletes
+	// its head branch; a closed pull request is left as it is.
+	Close(ctx context.Context, pr PullRequest, deleteBranch bool) error
+	// Revert opens a pull request undoing a merged one: the merged change's
+	// files are inverted in one commit on the current tip of the base — added
+	// files removed, changed and removed files restored — except the paths in
+	// overrides, which take the given content. History is never rewritten.
+	Revert(ctx context.Context, pr PullRequest, body string, overrides map[string][]byte) (PullRequest, error)
 }
 
 // Operation names of the remote calls, carried by AuthError and by Fake.Fail.
@@ -98,6 +114,10 @@ const (
 	OpOpenPullRequest = "open pull request"
 	OpStatus          = "pull request status"
 	OpMerge           = "merge"
+	OpFindPullRequest = "find pull request"
+	OpEnableAutoMerge = "enable auto-merge"
+	OpClose           = "close pull request"
+	OpRevert          = "revert pull request"
 )
 
 var (
@@ -120,7 +140,20 @@ var (
 	ErrChecksFailed = errors.New("merge refused: checks failed")
 	// ErrHeadMoved: the head is no longer the commit the caller saw.
 	ErrHeadMoved = errors.New("merge refused: the head moved since the pull request was seen")
+	// ErrNotMerged: only a merged pull request can be reverted.
+	ErrNotMerged = errors.New("revert refused: the pull request is not merged")
+	// ErrNothingToRevert: the merged pull request changed no files.
+	ErrNothingToRevert = errors.New("revert refused: the pull request changed no files")
 )
+
+// revertBranch, revertTitle and revertMessage name what Revert makes, the same
+// on every Remote. The "revert:" prefix keeps the title past a semantic pull
+// request check.
+func revertBranch(pr PullRequest) string { return fmt.Sprintf("revert-%d-%s", pr.Number, pr.Head) }
+func revertTitle(title string) string    { return fmt.Sprintf("revert: Revert %q", title) }
+func revertMessage(pr PullRequest, title, body string) string {
+	return fmt.Sprintf("Revert %q (#%d)\n\n%s", title, pr.Number, body)
+}
 
 // AuthError is ErrAuth with the status the remote answered and the operation
 // it refused. errors.Is(err, ErrAuth) matches it.

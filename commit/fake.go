@@ -37,12 +37,20 @@ type FakeCommit struct {
 // FakePullRequest is a pull request the Fake holds, with what the remote knows about it.
 type FakePullRequest struct {
 	PullRequest
-	Title  string
-	Body   string
-	Merged bool
-	Review ReviewState
-	Checks CheckState
+	Title     string
+	Body      string
+	Draft     bool
+	Merged    bool
+	Closed    bool // closed without a merge
+	AutoMerge bool
+	Review    ReviewState
+	Checks    CheckState
+
+	mergeBase string // head of the base when the pull request was merged
 }
+
+// open is what FindPullRequest and OpenPullRequest's reuse look for.
+func (p *FakePullRequest) open() bool { return !p.Merged && !p.Closed }
 
 // NewFake returns an empty Fake; seed base branches with AddBranch.
 func NewFake() *Fake {
@@ -151,8 +159,22 @@ func (f *Fake) Commit(_ context.Context, repo Repository, branch, message string
 
 // OpenPullRequest implements Remote.
 func (f *Fake) OpenPullRequest(_ context.Context, repo Repository, head, base, title, body string) (PullRequest, error) {
+	return f.openPullRequest(repo, head, base, title, body, false)
+}
+
+// OpenDraftPullRequest implements Remote.
+func (f *Fake) OpenDraftPullRequest(_ context.Context, repo Repository, head, base, title, body string) (PullRequest, error) {
+	return f.openPullRequest(repo, head, base, title, body, true)
+}
+
+func (f *Fake) openPullRequest(repo Repository, head, base, title, body string, draft bool) (PullRequest, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	return f.openLocked(repo, head, base, title, body, draft)
+}
+
+// openLocked is openPullRequest for a caller that holds the lock.
+func (f *Fake) openLocked(repo Repository, head, base, title, body string, draft bool) (PullRequest, error) {
 	if err := f.Fail[OpOpenPullRequest]; err != nil {
 		return PullRequest{}, err
 	}
@@ -160,11 +182,9 @@ func (f *Fake) OpenPullRequest(_ context.Context, repo Repository, head, base, t
 	if !ok {
 		return PullRequest{}, fmt.Errorf("%s: %s has no branch %q", OpOpenPullRequest, repo, head)
 	}
-	for _, pr := range f.prs {
-		if pr.Repository == repo && pr.Head == head && !pr.Merged {
-			pr.HeadSHA = headSHA
-			return pr.PullRequest, nil
-		}
+	if pr := f.findOpen(repo, head); pr != nil {
+		pr.HeadSHA = headSHA
+		return pr.PullRequest, nil
 	}
 	pr := &FakePullRequest{
 		PullRequest: PullRequest{
@@ -177,11 +197,119 @@ func (f *Fake) OpenPullRequest(_ context.Context, repo Repository, head, base, t
 		},
 		Title:  title,
 		Body:   body,
+		Draft:  draft,
 		Review: ReviewNone,
 		Checks: ChecksNone,
 	}
 	f.prs = append(f.prs, pr)
 	return pr.PullRequest, nil
+}
+
+// FindPullRequest implements Remote.
+func (f *Fake) FindPullRequest(_ context.Context, repo Repository, head string) (PullRequest, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.Fail[OpFindPullRequest]; err != nil {
+		return PullRequest{}, false, err
+	}
+	pr := f.findOpen(repo, head)
+	if pr == nil {
+		return PullRequest{}, false, nil
+	}
+	pr.HeadSHA = f.heads[key(repo, head)]
+	return pr.PullRequest, true, nil
+}
+
+// EnableAutoMerge implements Remote: the pull request is marked, nothing merges by itself.
+func (f *Fake) EnableAutoMerge(_ context.Context, pr PullRequest) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.Fail[OpEnableAutoMerge]; err != nil {
+		return err
+	}
+	p := f.find(pr)
+	if p == nil {
+		return fmt.Errorf("%s: %s has no pull request %d", OpEnableAutoMerge, pr.Repository, pr.Number)
+	}
+	if !p.open() {
+		return fmt.Errorf("%s: pull request %d is not open", OpEnableAutoMerge, pr.Number)
+	}
+	p.AutoMerge = true
+	return nil
+}
+
+// Close implements Remote.
+func (f *Fake) Close(_ context.Context, pr PullRequest, deleteBranch bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.Fail[OpClose]; err != nil {
+		return err
+	}
+	p := f.find(pr)
+	if p == nil {
+		return fmt.Errorf("%s: %s has no pull request %d", OpClose, pr.Repository, pr.Number)
+	}
+	if !p.open() {
+		return nil
+	}
+	p.Closed = true
+	if deleteBranch {
+		delete(f.heads, key(p.Repository, p.Head))
+	}
+	return nil
+}
+
+// Revert implements Remote: the merged pull request's files, inverted against
+// the base as it was at the merge, in one commit on the base's tip.
+func (f *Fake) Revert(_ context.Context, pr PullRequest, body string, overrides map[string][]byte) (PullRequest, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.Fail[OpRevert]; err != nil {
+		return PullRequest{}, err
+	}
+	p := f.find(pr)
+	if p == nil {
+		return PullRequest{}, fmt.Errorf("%s: %s has no pull request %d", OpRevert, pr.Repository, pr.Number)
+	}
+	if !p.Merged {
+		return PullRequest{}, ErrNotMerged
+	}
+	before, after := f.commits[p.mergeBase].Files, f.commits[p.HeadSHA].Files
+	changed := map[string]bool{}
+	for path, content := range after {
+		if was, ok := before[path]; !ok || string(was) != string(content) {
+			changed[path] = true
+		}
+	}
+	for path := range before {
+		if _, kept := after[path]; !kept {
+			changed[path] = true
+		}
+	}
+	if len(changed) == 0 {
+		return PullRequest{}, ErrNothingToRevert
+	}
+	tipSHA := f.heads[key(p.Repository, p.Base)]
+	tree := maps.Clone(f.commits[tipSHA].Files)
+	if tree == nil {
+		tree = map[string][]byte{}
+	}
+	for path := range changed {
+		switch content, was := before[path]; {
+		case overrides[path] != nil:
+			tree[path] = overrides[path]
+		case was:
+			tree[path] = content
+		default:
+			delete(tree, path)
+		}
+	}
+	branch := revertBranch(p.PullRequest)
+	if _, exists := f.heads[key(p.Repository, branch)]; !exists {
+		f.heads[key(p.Repository, branch)] = tipSHA
+	}
+	f.write(p.Repository, branch, revertMessage(p.PullRequest, p.Title, body), tipSHA, tree)
+	return f.openLocked(p.Repository, branch, p.Base, revertTitle(p.Title), body, false)
 }
 
 // Status implements Remote.
@@ -209,11 +337,25 @@ func (f *Fake) Merge(_ context.Context, pr PullRequest) error {
 	if p == nil {
 		return fmt.Errorf("%s: %s has no pull request %d", OpMerge, pr.Repository, pr.Number)
 	}
+	if p.Closed {
+		return fmt.Errorf("%s: pull request %d is closed", OpMerge, pr.Number)
+	}
 	if head := f.heads[key(p.Repository, p.Head)]; head != pr.HeadSHA {
 		return fmt.Errorf("%s: head is %s, not %s", OpMerge, head, pr.HeadSHA)
 	}
 	p.Merged = true
+	p.HeadSHA = pr.HeadSHA
+	p.mergeBase = f.heads[key(p.Repository, p.Base)]
 	f.heads[key(p.Repository, p.Base)] = pr.HeadSHA
+	return nil
+}
+
+func (f *Fake) findOpen(repo Repository, head string) *FakePullRequest {
+	for _, p := range f.prs {
+		if p.Repository == repo && p.Head == head && p.open() {
+			return p
+		}
+	}
 	return nil
 }
 
