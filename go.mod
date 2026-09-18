@@ -5,6 +5,7 @@ go 1.25.8
 require (
 	filippo.io/age v1.3.2
 	github.com/getsops/sops/v3 v3.13.3
+	github.com/google/go-github/v88 v88.0.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -69,6 +70,7 @@ require (
 	github.com/goccy/go-yaml v1.19.2 // indirect
 	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
+	github.com/google/go-querystring v1.2.0 // indirect
 	github.com/google/s2a-go v0.1.9 // indirect
 	github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510 // indirect
 	github.com/google/uuid v1.6.0 // indirect
