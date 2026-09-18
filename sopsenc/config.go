@@ -3,6 +3,7 @@ package sopsenc
 import (
 	"errors"
 	"fmt"
+	"path"
 	"regexp"
 	"strings"
 
@@ -108,4 +109,32 @@ func (c Config) Rule(path string) (Rule, error) {
 		}
 	}
 	return Rule{}, fmt.Errorf("%w: %s", ErrNoRule, path)
+}
+
+// kustomizeFiles are the file names kustomize reads to build a directory.
+// kustomize reads them before anything is decrypted, so they stay plaintext
+// wherever they sit — a secrets/ directory's kustomization.yaml included.
+var kustomizeFiles = map[string]bool{"kustomization.yaml": true, "kustomization.yml": true, "Kustomization": true}
+
+// IsSecretFile reports whether the repository's .sops.yaml makes the
+// repository-relative path a secret file: a creation rule's path_regex
+// matches it, whatever its name, or its name follows the secret-file
+// convention (the package-level IsSecretFile). Such a file is encrypted for
+// its rule's recipients or refused with ErrNoRule; it is never written in
+// plaintext. A rule without path_regex names recipients for every secret file
+// and makes no path a secret by itself. The kustomize entry-point files are
+// never secret files.
+func (c Config) IsSecretFile(p string) bool {
+	if kustomizeFiles[path.Base(p)] {
+		return false
+	}
+	if IsSecretFile(p) {
+		return true
+	}
+	for _, rule := range c.rules {
+		if rule.PathRegex != nil && rule.PathRegex.MatchString(p) {
+			return true
+		}
+	}
+	return false
 }

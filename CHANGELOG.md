@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `sopsenc`: which files are secret files follows the repository's `.sops.yaml` — a file a creation rule's `path_regex` matches is encrypted whatever its name (`secrets/api-key.yaml` by its directory); a `*secret*`/`*credential*`-named file no rule covers is refused, never written in plaintext; kustomize's entry-point files stay plaintext. `Config.IsSecretFile` and `Encryptor.IsSecretFile` expose the decision.
+
 ### Added
 
 - `provenance`: the owning GitHub repository, branch and directory of a target from its Flux Kustomization and GitRepository, or explicit.

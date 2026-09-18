@@ -44,9 +44,12 @@ type File struct {
 	Generated []Generated
 }
 
-// IsSecretFile reports whether a path names a secret file by the convention
-// the .sops.yaml creation rules follow: a base name containing "secret" or
-// "credential".
+// IsSecretFile reports whether a path names a secret file by the file-naming
+// convention: a base name containing "secret" or "credential". It is the
+// naming contract for callers that render secret files, not the encryption
+// decision: which files Encrypt encrypts follows the repository's .sops.yaml
+// (Encryptor.IsSecretFile), whose path_regex rules match paths — a file under
+// a secrets/ directory is a secret file whatever its name.
 func IsSecretFile(p string) bool {
 	base := path.Base(p)
 	return strings.Contains(base, "secret") || strings.Contains(base, "credential")
@@ -66,14 +69,22 @@ func New(sopsYAML []byte) (*Encryptor, error) {
 	return &Encryptor{config: config}, nil
 }
 
+// IsSecretFile reports whether Encrypt treats the repository-relative path as
+// a secret file, by the repository's .sops.yaml (Config.IsSecretFile).
+func (e *Encryptor) IsSecretFile(path string) bool {
+	return e.config.IsSecretFile(path)
+}
+
 // Encrypt returns the fileset ready to commit, keyed by repository-relative
-// path. Files that are not secret files pass through unchanged. A secret
-// file that exists in the repository (exists reports its path) is left as it
-// is and absent from the result: it is never re-generated. Every other secret
-// file has its generated values filled in — one value per name across all
-// files — and is encrypted for the recipients of its creation rule.
+// path. Files the repository's .sops.yaml does not make secret files
+// (IsSecretFile) pass through unchanged. A secret file that exists in the
+// repository (exists reports its path) is left as it is and absent from the
+// result: it is never re-generated. Every other secret file has its generated
+// values filled in — one value per name across all files — and is encrypted
+// for the recipients of its creation rule; a secret file no rule covers is
+// refused with ErrNoRule.
 func (e *Encryptor) Encrypt(files []File, exists func(path string) bool) (map[string][]byte, error) {
-	if err := validateFileset(files); err != nil {
+	if err := e.validateFileset(files); err != nil {
 		return nil, err
 	}
 	frozen := map[string]string{} // generated name -> existing file that holds it
@@ -81,7 +92,7 @@ func (e *Encryptor) Encrypt(files []File, exists func(path string) bool) (map[st
 	result := make(map[string][]byte, len(files))
 	for _, f := range files {
 		switch {
-		case !IsSecretFile(f.Path):
+		case !e.IsSecretFile(f.Path):
 			result[f.Path] = f.Content
 		case exists(f.Path):
 			for _, g := range f.Generated {
@@ -113,14 +124,14 @@ func (e *Encryptor) Encrypt(files []File, exists func(path string) bool) (map[st
 	return result, nil
 }
 
-func validateFileset(files []File) error {
+func (e *Encryptor) validateFileset(files []File) error {
 	seen := make(map[string]struct{}, len(files))
 	for _, f := range files {
 		if _, dup := seen[f.Path]; dup {
 			return fmt.Errorf("%w: %s", ErrDuplicatePath, f.Path)
 		}
 		seen[f.Path] = struct{}{}
-		if len(f.Generated) > 0 && !IsSecretFile(f.Path) {
+		if len(f.Generated) > 0 && !e.IsSecretFile(f.Path) {
 			return fmt.Errorf("%w: %s", ErrGeneratedInPlainFile, f.Path)
 		}
 		for _, g := range f.Generated {
