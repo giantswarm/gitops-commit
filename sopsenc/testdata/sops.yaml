@@ -1,0 +1,10 @@
+# Fixture .sops.yaml in the shape of a management-clusters repository. The
+# tests replace AGE_RECIPIENT with a key pair generated per test run, so no
+# private key is ever checked in.
+creation_rules:
+  - age: AGE_RECIPIENT
+    path_regex: management-clusters/mc1/.*(secret|credential).*
+    encrypted_regex: ^(data|stringData)$
+  - age: OTHER_RECIPIENT
+    path_regex: management-clusters/other/.*(secret|credential).*
+    encrypted_regex: ^(data|stringData)$
