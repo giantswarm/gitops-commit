@@ -25,8 +25,9 @@ var (
 	// ErrDuplicatePath is returned when a fileset names one path twice.
 	ErrDuplicatePath = errors.New("duplicate file path")
 	// ErrGeneratedInPlainFile is returned when a file that is not a secret file
-	// declares generated values: a generated value only lives encrypted.
-	ErrGeneratedInPlainFile = errors.New("generated values are only allowed in secret files")
+	// declares a generated value other than a key pair's public half: a secret
+	// value only lives encrypted.
+	ErrGeneratedInPlainFile = errors.New("generated values other than a key pair's public half are only allowed in secret files")
 	// ErrValueFrozen is returned when a new secret file shares a generated
 	// value with a secret file that already exists in the repository. The
 	// existing value cannot be reproduced without decryption, so the caller
@@ -40,7 +41,8 @@ type File struct {
 	Path    string
 	Content []byte
 	// Generated declares the placeholders in Content that receive generated
-	// values. Only a secret file may declare them.
+	// values. A file that is not a secret file may declare a key pair's
+	// public half only.
 	Generated []Generated
 }
 
@@ -77,23 +79,24 @@ func (e *Encryptor) IsSecretFile(path string) bool {
 
 // Encrypt returns the fileset ready to commit, keyed by repository-relative
 // path. Files the repository's .sops.yaml does not make secret files
-// (IsSecretFile) pass through unchanged. A secret file that exists in the
-// repository (exists reports its path) is left as it is and absent from the
-// result: it is never re-generated. Every other secret file has its generated
-// values filled in — one value per name across all files — and is encrypted
-// for the recipients of its creation rule; a secret file no rule covers is
-// refused with ErrNoRule.
+// (IsSecretFile) pass through in plaintext, a key pair's public half filled in
+// where one is declared. A secret file that exists in the repository (exists
+// reports its path) is left as it is and absent from the result: it is never
+// re-generated. Every other secret file has its generated values filled in —
+// one value or key pair per name across all files — and is encrypted for the
+// recipients of its creation rule; a secret file no rule covers is refused
+// with ErrNoRule.
 func (e *Encryptor) Encrypt(files []File, exists func(path string) bool) (map[string][]byte, error) {
 	if err := e.validateFileset(files); err != nil {
 		return nil, err
 	}
 	frozen := map[string]string{} // generated name -> existing file that holds it
-	var pending []File
+	var plain, pending []File
 	result := make(map[string][]byte, len(files))
 	for _, f := range files {
 		switch {
 		case !e.IsSecretFile(f.Path):
-			result[f.Path] = f.Content
+			plain = append(plain, f)
 		case exists(f.Path):
 			for _, g := range f.Generated {
 				frozen[g.Name] = f.Path
@@ -102,20 +105,19 @@ func (e *Encryptor) Encrypt(files []File, exists func(path string) bool) (map[st
 			pending = append(pending, f)
 		}
 	}
-	values, err := generateValues(pending, frozen)
+	values, err := generateValues(pending, plain, frozen)
 	if err != nil {
 		return nil, err
+	}
+	for _, f := range plain {
+		result[f.Path] = fill(f, values)
 	}
 	for _, f := range pending {
 		rule, err := e.config.Rule(f.Path)
 		if err != nil {
 			return nil, err
 		}
-		plaintext := f.Content
-		for _, g := range f.Generated {
-			plaintext = bytes.ReplaceAll(plaintext, []byte(g.Placeholder), []byte(values[g.Name]))
-		}
-		encrypted, err := encrypt(plaintext, rule)
+		encrypted, err := encrypt(fill(f, values), rule)
 		if err != nil {
 			return nil, fmt.Errorf("encrypting %s: %w", f.Path, err)
 		}
@@ -131,10 +133,10 @@ func (e *Encryptor) validateFileset(files []File) error {
 			return fmt.Errorf("%w: %s", ErrDuplicatePath, f.Path)
 		}
 		seen[f.Path] = struct{}{}
-		if len(f.Generated) > 0 && !e.IsSecretFile(f.Path) {
-			return fmt.Errorf("%w: %s", ErrGeneratedInPlainFile, f.Path)
-		}
 		for _, g := range f.Generated {
+			if !e.IsSecretFile(f.Path) && g.Half != Public {
+				return fmt.Errorf("%w: %s declares %q", ErrGeneratedInPlainFile, f.Path, g.Name)
+			}
 			if err := g.validate(); err != nil {
 				return fmt.Errorf("%s: %w", f.Path, err)
 			}
@@ -146,35 +148,55 @@ func (e *Encryptor) validateFileset(files []File) error {
 	return nil
 }
 
-// generateValues draws one value per generated name across the pending files,
-// refusing names whose value is frozen in an existing encrypted file and
-// declarations of one name that disagree on shape.
-func generateValues(pending []File, frozen map[string]string) (map[string]string, error) {
+// fill writes the generated material into the file's placeholders.
+func fill(f File, values map[string]material) []byte {
+	content := f.Content
+	for _, g := range f.Generated {
+		content = bytes.ReplaceAll(content, []byte(g.Placeholder), []byte(g.pick(values[g.Name])))
+	}
+	return content
+}
+
+// generateValues draws one value or key pair per generated name across the
+// files being written, refusing names whose value is frozen in an existing
+// encrypted file, declarations of one name that disagree on shape, and a key
+// pair whose private half no secret file receives: it would be lost.
+func generateValues(pending, plain []File, frozen map[string]string) (map[string]material, error) {
 	declared := map[string]Generated{}
+	privateHalf := map[string]bool{}
 	var names []string
-	for _, f := range pending {
-		for _, g := range f.Generated {
-			if holder, ok := frozen[g.Name]; ok {
-				return nil, fmt.Errorf("%w: %q is in %s, needed by %s", ErrValueFrozen, g.Name, holder, f.Path)
-			}
-			if prev, ok := declared[g.Name]; ok {
-				if !prev.sameShape(g) {
-					return nil, fmt.Errorf("%w: %q declared as %s/%d and %s/%d", ErrInvalidGenerated, g.Name, prev.Kind, prev.Length, g.Kind, g.Length)
+	for _, files := range [][]File{pending, plain} {
+		for _, f := range files {
+			for _, g := range f.Generated {
+				if holder, ok := frozen[g.Name]; ok {
+					return nil, fmt.Errorf("%w: %q is in %s, needed by %s", ErrValueFrozen, g.Name, holder, f.Path)
 				}
-				continue
+				if g.Half == Private {
+					privateHalf[g.Name] = true
+				}
+				if prev, ok := declared[g.Name]; ok {
+					if !prev.sameShape(g) {
+						return nil, fmt.Errorf("%w: %q declared as %s/%d and %s/%d", ErrInvalidGenerated, g.Name, prev.Kind, prev.Length, g.Kind, g.Length)
+					}
+					continue
+				}
+				declared[g.Name] = g
+				names = append(names, g.Name)
 			}
-			declared[g.Name] = g
-			names = append(names, g.Name)
 		}
 	}
 	sort.Strings(names)
-	values := make(map[string]string, len(names))
+	values := make(map[string]material, len(names))
 	for _, name := range names {
-		value, err := declared[name].generate()
+		g := declared[name]
+		if g.Kind == KeyPairES256 && !privateHalf[name] {
+			return nil, fmt.Errorf("%w: key pair %q has no private half in a secret file", ErrInvalidGenerated, name)
+		}
+		m, err := g.generate()
 		if err != nil {
 			return nil, err
 		}
-		values[name] = value
+		values[name] = m
 	}
 	return values, nil
 }
