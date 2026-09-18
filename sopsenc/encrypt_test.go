@@ -2,6 +2,10 @@ package sopsenc
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"log"
@@ -30,7 +34,19 @@ const (
 	placeholderValkey        = "__VALKEY__"
 	placeholderKey           = "__KEY__"
 	placeholderP             = "__P__"
+	// pluginKeysSecretPath carries a key pair inside a nested values document,
+	// the shape of a HelmRelease's valuesFrom Secret; pluginPublicPath is a
+	// plain file carrying the pair's public half.
+	pluginKeysSecretPath = "management-clusters/mc1/apps/portal/plugin-keys-secret.yaml"
+	pluginPublicPath     = "management-clusters/mc1/apps/portal/configmap.yaml"
+	pairName             = "plugin-keys"
+	placeholderPrivate   = "__PRIVATE__"
+	placeholderPublic    = "__PUBLIC__"
 )
+
+func keyPair(half Half, placeholder string) Generated {
+	return Generated{Name: pairName, Placeholder: placeholder, Kind: KeyPairES256, Half: half}
+}
 
 // fixture is a fresh age key pair with the testdata .sops.yaml encrypting for it.
 type fixture struct {
@@ -108,14 +124,19 @@ func secretYAML(name, key, value string) []byte {
 
 func stringDataValue(t *testing.T, plain []byte, key string) string {
 	t.Helper()
-	var doc struct {
-		Metadata   struct{ Name string } `yaml:"metadata"`
-		StringData map[string]string     `yaml:"stringData"`
+	return mapValue(t, plain, "stringData", key)
+}
+
+// mapValue is doc's section.key, read back through the YAML parser.
+func mapValue(t *testing.T, doc []byte, section, key string) string {
+	t.Helper()
+	var parsed map[string]any
+	if err := yamlv3.Unmarshal(doc, &parsed); err != nil {
+		t.Fatalf("not a YAML document: %v\n%s", err, doc)
 	}
-	if err := yamlv3.Unmarshal(plain, &doc); err != nil {
-		t.Fatalf("plaintext is not the Secret: %v\n%s", err, plain)
-	}
-	return doc.StringData[key]
+	values, _ := parsed[section].(map[string]any)
+	value, _ := values[key].(string)
+	return value
 }
 
 func nothingExists(string) bool { return false }
@@ -236,6 +257,15 @@ func TestEncryptKeepsExistingSecretFilesAndRefusesFrozenValues(t *testing.T) {
 	if !errors.Is(err, ErrValueFrozen) {
 		t.Fatalf("shared value with an existing file: error = %v, want ErrValueFrozen", err)
 	}
+
+	// A key pair's public half cannot be derived from a private half that is
+	// already encrypted: the pair is frozen as a whole.
+	keys := File{Path: pluginKeysSecretPath, Content: []byte("a: " + placeholderPrivate + "\n"), Generated: []Generated{keyPair(Private, placeholderPrivate)}}
+	publicOnly := File{Path: pluginPublicPath, Content: []byte("a: " + placeholderPublic + "\n"), Generated: []Generated{keyPair(Public, placeholderPublic)}}
+	_, err = fx.encryptor.Encrypt([]File{keys, publicOnly}, func(p string) bool { return p == pluginKeysSecretPath })
+	if !errors.Is(err, ErrValueFrozen) {
+		t.Fatalf("public half of an existing key pair: error = %v, want ErrValueFrozen", err)
+	}
 }
 
 func TestEncryptValidation(t *testing.T) {
@@ -261,6 +291,16 @@ func TestEncryptValidation(t *testing.T) {
 		"no matching rule": {files: []File{{Path: "installations/x/secret.yaml", Content: []byte("a: b\n")}}, want: ErrNoRule},
 		"generated in a secrets/ kustomization": {files: []File{{Path: secretsKustomizationPath, Content: []byte(placeholderP), Generated: []Generated{gen}}},
 			want: ErrGeneratedInPlainFile},
+		"private half in a plain file": {files: []File{{Path: plainPath, Content: []byte(placeholderPrivate), Generated: []Generated{keyPair(Private, placeholderPrivate)}}},
+			want: ErrGeneratedInPlainFile},
+		"key pair without a half": {files: []File{{Path: dexSecretPath, Content: []byte("a: __P__\n"),
+			Generated: []Generated{{Name: "n", Placeholder: placeholderP, Kind: KeyPairES256}}}}, want: ErrInvalidGenerated},
+		"key pair with a length": {files: []File{{Path: dexSecretPath, Content: []byte("a: __P__\n"),
+			Generated: []Generated{{Name: "n", Placeholder: placeholderP, Kind: KeyPairES256, Half: Private, Length: 32}}}}, want: ErrInvalidGenerated},
+		"half on a value": {files: []File{{Path: dexSecretPath, Content: []byte("a: __P__\n"),
+			Generated: []Generated{{Name: "n", Placeholder: placeholderP, Kind: Base64, Length: 8, Half: Public}}}}, want: ErrInvalidGenerated},
+		"public half without a private half": {files: []File{{Path: dexSecretPath, Content: []byte("a: " + placeholderPublic + "\n"), Generated: []Generated{keyPair(Public, placeholderPublic)}}},
+			want: ErrInvalidGenerated},
 	}
 	for label, tc := range cases {
 		t.Run(label, func(t *testing.T) {
@@ -377,4 +417,93 @@ func TestCatchAllRuleNamesRecipientsWithoutMakingFilesSecret(t *testing.T) {
 	if got := stringDataValue(t, decrypt(t, out[consumerSecretPath], fx.identity), "k"); got != "v" {
 		t.Fatalf("secret file not encrypted for the catch-all rule: %q", got)
 	}
+}
+
+func TestEncryptKeyPairHalvesMatchAcrossFilesAndThePrivateHalfStaysEncrypted(t *testing.T) {
+	fx := newFixture(t)
+	secret := []byte("apiVersion: v1\nkind: Secret\nmetadata:\n  name: plugin-keys\n  namespace: mc1\nstringData:\n  values: |\n    pluginKeys:\n      - keyId: portal\n        publicKey: " + placeholderPublic + "\n        privateKey: " + placeholderPrivate + "\n")
+	configMap := []byte("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: plugin-public-key\n  namespace: mc1\ndata:\n  public.key: " + placeholderPublic + "\n")
+	files := []File{
+		{Path: pluginKeysSecretPath, Content: secret, Generated: []Generated{keyPair(Public, placeholderPublic), keyPair(Private, placeholderPrivate)}},
+		{Path: pluginPublicPath, Content: configMap, Generated: []Generated{keyPair(Public, placeholderPublic)}},
+	}
+
+	var logs bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	out, err := fx.encryptor.Encrypt(files, nothingExists)
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	if len(out) != 2 {
+		t.Fatalf("Encrypt returned %d files, want 2", len(out))
+	}
+
+	public := parsePublicKey(t, mapValue(t, out[pluginPublicPath], "data", "public.key"))
+
+	var nested struct {
+		PluginKeys []struct {
+			PublicKey  string `yaml:"publicKey"`
+			PrivateKey string `yaml:"privateKey"`
+		} `yaml:"pluginKeys"`
+	}
+	values := stringDataValue(t, decrypt(t, out[pluginKeysSecretPath], fx.identity), "values")
+	if err := yamlv3.Unmarshal([]byte(values), &nested); err != nil || len(nested.PluginKeys) != 1 {
+		t.Fatalf("the nested values document did not survive the halves: %v\n%s", err, values)
+	}
+	private := parsePrivateKey(t, nested.PluginKeys[0].PrivateKey)
+	if !private.PublicKey.Equal(public) {
+		t.Fatal("the plain file's public half is not the counterpart of the encrypted private half")
+	}
+	if !parsePublicKey(t, nested.PluginKeys[0].PublicKey).Equal(public) {
+		t.Fatal("the secret file's public half differs from the plain file's")
+	}
+
+	privateBody := strings.Split(nested.PluginKeys[0].PrivateKey, "\n")[1]
+	for p, content := range out {
+		for _, value := range []string{privateBody, placeholderPrivate, placeholderPublic} {
+			if bytes.Contains(content, []byte(value)) {
+				t.Errorf("%s carries %q", p, value)
+			}
+		}
+	}
+	if logs.Len() != 0 {
+		t.Errorf("the package logged: %s", logs.String())
+	}
+}
+
+func parsePublicKey(t *testing.T, pemText string) *ecdsa.PublicKey {
+	t.Helper()
+	block, _ := pem.Decode([]byte(pemText))
+	if block == nil || block.Type != "PUBLIC KEY" {
+		t.Fatalf("not a SubjectPublicKeyInfo PEM: %q", pemText)
+	}
+	key, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		t.Fatalf("parsing the public key: %v", err)
+	}
+	public, ok := key.(*ecdsa.PublicKey)
+	if !ok || public.Curve != elliptic.P256() {
+		t.Fatalf("public key is %T on %v, want ECDSA P-256", key, public.Curve)
+	}
+	return public
+}
+
+func parsePrivateKey(t *testing.T, pemText string) *ecdsa.PrivateKey {
+	t.Helper()
+	block, _ := pem.Decode([]byte(pemText))
+	if block == nil || block.Type != "PRIVATE KEY" {
+		t.Fatalf("not a PKCS #8 PEM: %q", pemText)
+	}
+	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		t.Fatalf("parsing the private key: %v", err)
+	}
+	private, ok := key.(*ecdsa.PrivateKey)
+	if !ok || private.Curve != elliptic.P256() {
+		t.Fatalf("private key is %T, want ECDSA P-256", key)
+	}
+	return private
 }
