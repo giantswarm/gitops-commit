@@ -1,11 +1,11 @@
 module github.com/giantswarm/gitops-commit
 
-go 1.25.8
+go 1.26.0
 
 require (
 	filippo.io/age v1.3.2
 	github.com/getsops/sops/v3 v3.13.3
-	github.com/google/go-github/v88 v88.0.0
+	github.com/google/go-github/v92 v92.0.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 

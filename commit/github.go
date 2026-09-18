@@ -11,7 +11,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/google/go-github/v88/github"
+	"github.com/google/go-github/v92/github"
 )
 
 const (
