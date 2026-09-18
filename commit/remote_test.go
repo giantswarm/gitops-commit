@@ -219,3 +219,35 @@ func TestFakeFailCoversTheNewOperations(t *testing.T) {
 		}
 	}
 }
+
+func TestApproveRecordsTheReviewAndTheRollup(t *testing.T) {
+	f, _, _ := fixture(t)
+	ctx := context.Background()
+	pr := opened(t, f, "approved", map[string][]byte{oneFile: []byte("a")})
+	if err := f.Approve(ctx, pr, "looks right"); err != nil {
+		t.Fatal(err)
+	}
+	st, err := f.Status(ctx, pr)
+	if err != nil || st.Review != ReviewApproved {
+		t.Fatalf("after Approve: %+v %v", st, err)
+	}
+	if prs := f.PullRequests(); len(prs) != 1 || len(prs[0].Approvals) != 1 || prs[0].Approvals[0] != "looks right" {
+		t.Errorf("approvals: %+v", prs)
+	}
+	f.SetReview(pr, ReviewChangesRequested)
+	if err := f.Approve(ctx, pr, "again"); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := f.Status(ctx, pr); st.Review != ReviewChangesRequested {
+		t.Error("an approval cleared another reviewer's changes requested")
+	}
+	if err := f.Close(ctx, pr, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Approve(ctx, pr, "late"); err == nil {
+		t.Error("a closed pull request took an approval")
+	}
+	if err := f.Approve(ctx, PullRequest{Repository: repoA, Number: 99}, "x"); err == nil {
+		t.Error("an unknown pull request took an approval")
+	}
+}

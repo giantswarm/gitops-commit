@@ -87,6 +87,10 @@ type Remote interface {
 	OpenPullRequest(ctx context.Context, repo Repository, head, base, title, body string) (PullRequest, error)
 	// Status reads the pull request's head, merged flag, review and check state.
 	Status(ctx context.Context, pr PullRequest) (Status, error)
+	// Approve submits an approving review on the pull request as the person —
+	// the identity the remote was built with. GitHub refuses a review by the
+	// pull request's own author; callers check the author before the call.
+	Approve(ctx context.Context, pr PullRequest, body string) error
 	// Merge merges the pull request as the person, refusing when the head is not pr.HeadSHA.
 	Merge(ctx context.Context, pr PullRequest) error
 	// FindPullRequest returns the open pull request whose head is head, and whether there is one.
@@ -114,6 +118,7 @@ const (
 	OpOpenPullRequest = "open pull request"
 	OpStatus          = "pull request status"
 	OpMerge           = "merge"
+	OpApprove         = "approve pull request"
 	OpFindPullRequest = "find pull request"
 	OpEnableAutoMerge = "enable auto-merge"
 	OpClose           = "close pull request"
