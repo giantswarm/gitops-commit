@@ -21,10 +21,15 @@ const (
 	dexSecretPath      = "management-clusters/mc1/apps/dex-app/secret-values.yaml"
 	consumerSecretPath = "management-clusters/mc1/apps/mcp/secret.yaml"
 	plainPath          = "management-clusters/mc1/apps/mcp/values.yaml"
-	sharedName         = "dex-client"
-	placeholderDex     = "__DEX_CLIENT_SECRET__"
-	placeholderValkey  = "__VALKEY__"
-	placeholderP       = "__P__"
+	// directorySecretPath is a secret file by its directory only: the rule's
+	// path_regex matches "secrets/", the base name says nothing.
+	directorySecretPath      = "management-clusters/mc1/extras/agent-platform/secrets/kagent-anthropic-key.yaml"
+	secretsKustomizationPath = "management-clusters/mc1/extras/agent-platform/secrets/kustomization.yaml"
+	sharedName               = "dex-client"
+	placeholderDex           = "__DEX_CLIENT_SECRET__"
+	placeholderValkey        = "__VALKEY__"
+	placeholderKey           = "__KEY__"
+	placeholderP             = "__P__"
 )
 
 // fixture is a fresh age key pair with the testdata .sops.yaml encrypting for it.
@@ -254,6 +259,8 @@ func TestEncryptValidation(t *testing.T) {
 			{Path: consumerSecretPath, Content: []byte("a: __P__\n"), Generated: []Generated{{Name: "n", Placeholder: placeholderP, Kind: Alphanumeric, Length: 8}}},
 		}, want: ErrInvalidGenerated},
 		"no matching rule": {files: []File{{Path: "installations/x/secret.yaml", Content: []byte("a: b\n")}}, want: ErrNoRule},
+		"generated in a secrets/ kustomization": {files: []File{{Path: secretsKustomizationPath, Content: []byte(placeholderP), Generated: []Generated{gen}}},
+			want: ErrGeneratedInPlainFile},
 	}
 	for label, tc := range cases {
 		t.Run(label, func(t *testing.T) {
@@ -297,5 +304,77 @@ func TestIsSecretFile(t *testing.T) {
 		if got := IsSecretFile(p); got != want {
 			t.Errorf("IsSecretFile(%q) = %v, want %v", p, got, want)
 		}
+	}
+}
+
+func TestEncryptDecidesSecretFilesByThePathRules(t *testing.T) {
+	fx := newFixture(t)
+	key := File{
+		Path:      directorySecretPath,
+		Content:   secretYAML("kagent-anthropic-key", "apiKey", placeholderKey),
+		Generated: []Generated{{Name: "anthropic-key", Placeholder: placeholderKey, Kind: Alphanumeric, Length: 16}},
+	}
+	kustomization := File{Path: secretsKustomizationPath, Content: []byte("resources:\n  - kagent-anthropic-key.yaml\n")}
+
+	out, err := fx.encryptor.Encrypt([]File{kustomization, key}, nothingExists)
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	if string(out[secretsKustomizationPath]) != string(kustomization.Content) {
+		t.Fatalf("the kustomization in secrets/ did not stay plaintext: %q", out[secretsKustomizationPath])
+	}
+	if bytes.Contains(out[directorySecretPath], []byte(placeholderKey)) || !bytes.Contains(out[directorySecretPath], []byte("sops:")) {
+		t.Fatalf("file matched by its directory was not encrypted:\n%s", out[directorySecretPath])
+	}
+	apiKey := stringDataValue(t, decrypt(t, out[directorySecretPath], fx.identity), "apiKey")
+	if len(apiKey) != 16 || apiKey == placeholderKey {
+		t.Fatalf("apiKey not generated: %q", apiKey)
+	}
+
+	out, err = fx.encryptor.Encrypt([]File{kustomization, key}, func(p string) bool { return p == directorySecretPath })
+	if err != nil {
+		t.Fatalf("Encrypt with the key file existing: %v", err)
+	}
+	if _, present := out[directorySecretPath]; present || len(out) != 1 {
+		t.Fatalf("existing file matched by its directory was re-generated: %v", out)
+	}
+}
+
+func TestEncryptorIsSecretFile(t *testing.T) {
+	fx := newFixture(t)
+	for p, want := range map[string]bool{
+		directorySecretPath:      true,  // by its directory
+		secretsKustomizationPath: false, // kustomize reads it before decryption
+		"management-clusters/mc1/extras/agent-platform/secrets/Kustomization": false,
+		"management-clusters/mc1/extras/agent-platform/kustomization.yaml":    false,
+		dexSecretPath:                 true,
+		plainPath:                     false,
+		"installations/x/secret.yaml": true, // by name; Encrypt refuses it with ErrNoRule
+		"installations/x/values.yaml": false,
+	} {
+		if got := fx.encryptor.IsSecretFile(p); got != want {
+			t.Errorf("IsSecretFile(%q) = %v, want %v", p, got, want)
+		}
+	}
+}
+
+func TestCatchAllRuleNamesRecipientsWithoutMakingFilesSecret(t *testing.T) {
+	fx := newFixture(t)
+	enc, err := New([]byte("creation_rules:\n  - age: " + fx.identity.Recipient().String() + "\n"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if enc.IsSecretFile(plainPath) || !enc.IsSecretFile(consumerSecretPath) {
+		t.Fatal("a rule without path_regex decided which files are secret files")
+	}
+	out, err := enc.Encrypt([]File{{Path: plainPath, Content: []byte("a: b\n")}, {Path: consumerSecretPath, Content: secretYAML("mcp", "k", "v")}}, nothingExists)
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	if string(out[plainPath]) != "a: b\n" {
+		t.Fatalf("plain file changed under a catch-all rule: %q", out[plainPath])
+	}
+	if got := stringDataValue(t, decrypt(t, out[consumerSecretPath], fx.identity), "k"); got != "v" {
+		t.Fatalf("secret file not encrypted for the catch-all rule: %q", got)
 	}
 }
