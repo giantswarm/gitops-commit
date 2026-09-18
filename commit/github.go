@@ -567,3 +567,17 @@ func hasStatus(err error, code int) bool {
 	var ghErr *github.ErrorResponse
 	return errors.As(err, &ghErr) && ghErr.Response != nil && ghErr.Response.StatusCode == code
 }
+
+// Approve submits an approving review on the pull request as the person,
+// pinned to pr.HeadSHA when the caller names it. GitHub applies its own
+// rules to the call: the author of a pull request cannot approve it.
+func (g *GitHub) Approve(ctx context.Context, pr PullRequest, body string) error {
+	review := &github.PullRequestReviewRequest{Event: github.Ptr("APPROVE"), Body: github.Ptr(body)}
+	if pr.HeadSHA != "" {
+		review.CommitID = github.Ptr(pr.HeadSHA)
+	}
+	if _, _, err := g.gh.PullRequests.CreateReview(ctx, pr.Repository.Owner, pr.Repository.Name, pr.Number, review); err != nil {
+		return wrap(OpApprove, err)
+	}
+	return nil
+}

@@ -44,6 +44,8 @@ type FakePullRequest struct {
 	Closed    bool // closed without a merge
 	AutoMerge bool
 	Review    ReviewState
+	// Approvals are the bodies of the approving reviews Approve submitted, in order.
+	Approvals []string
 	Checks    CheckState
 
 	mergeBase string // head of the base when the pull request was merged
@@ -383,3 +385,26 @@ func (f *Fake) write(repo Repository, branch, message, parent string, tree map[s
 }
 
 func key(repo Repository, branch string) string { return repo.String() + "#" + branch }
+
+// Approve implements Remote: the approval is recorded on the pull request and
+// the review rollup becomes approved unless changes are requested. An unknown
+// or closed pull request is an error.
+func (f *Fake) Approve(_ context.Context, pr PullRequest, body string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.Fail[OpApprove]; err != nil {
+		return err
+	}
+	p := f.find(pr)
+	if p == nil {
+		return fmt.Errorf("%s: %s has no pull request #%d", OpApprove, pr.Repository, pr.Number)
+	}
+	if !p.open() {
+		return fmt.Errorf("%s: %s#%d is not open", OpApprove, pr.Repository, pr.Number)
+	}
+	p.Approvals = append(p.Approvals, body)
+	if p.Review != ReviewChangesRequested {
+		p.Review = ReviewApproved
+	}
+	return nil
+}

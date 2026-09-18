@@ -194,3 +194,34 @@ func (h headerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	r.Header.Set(h.name, h.value)
 	return http.DefaultTransport.RoundTrip(r)
 }
+
+func TestGitHubApproveSubmitsAnApprovingReviewOnTheHead(t *testing.T) {
+	mux, gh := server(t)
+	var got map[string]any
+	mux.HandleFunc("/api/v3/repos/acme/management-clusters/pulls/7/reviews", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("method %s", r.Method)
+		}
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		writeJSON(t, w, map[string]any{"id": 1, "state": "APPROVED"})
+	})
+	if err := gh.Approve(context.Background(), PullRequest{Repository: repoA, Number: 7, HeadSHA: "abc123"}, "approved by the team"); err != nil {
+		t.Fatal(err)
+	}
+	if got["event"] != "APPROVE" || got["body"] != "approved by the team" || got["commit_id"] != "abc123" {
+		t.Errorf("review request: %v", got)
+	}
+}
+
+func TestGitHubApproveRefusedIsAnAuthError(t *testing.T) {
+	mux, gh := server(t)
+	mux.HandleFunc("/api/v3/repos/acme/management-clusters/pulls/7/reviews", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		writeJSON(t, w, map[string]any{"message": "Resource not accessible by integration"})
+	})
+	err := gh.Approve(context.Background(), PullRequest{Repository: repoA, Number: 7}, "x")
+	var auth *AuthError
+	if !errors.As(err, &auth) || auth.Op != OpApprove || auth.Status != http.StatusForbidden {
+		t.Errorf("want AuthError{%s, 403}, got %v", OpApprove, err)
+	}
+}

@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `sopsenc`: SOPS encryption of `*secret*`/`*credential*` files for the age recipients of the repository's `.sops.yaml` creation rule, with generated values that exist only in the encrypted output; no decryption code path, asserted by a test.
 - `commit`: a branch, one commit per repository and the pull request with the caller's title and body, through a `Remote` built from the caller's token; the merge as the person, refused before the caller's approval, before green checks and when the head moved; a refused token as `ErrAuth` with the GitHub status; a `Fake` remote for tests.
 - `commit`: the pull-request seams on `Remote` and `Fake` — `FindPullRequest`, `OpenDraftPullRequest`, `EnableAutoMerge` (the caller's choice, with the repository's merge method), `Close` and `Revert` — and `NewGitHubWithClient` for a remote on an HTTP client that already carries the caller's identity.
+- `commit`: `Approve` on `Remote` and `Fake` — an approving review on a pull request as the person, pinned to the head the caller saw; the `Fake` records the approvals and reports the rollup.
 
 
 [Unreleased]: https://github.com/giantswarm/gitops-commit/tree/main
