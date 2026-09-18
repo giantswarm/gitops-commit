@@ -6,3 +6,12 @@ Go module that lands rendered files in GitOps repositories as the person: Flux p
 
 - `provenance` — where a target's files live. `Flux.Resolve(namespace, name)` follows a Flux Kustomization to its GitRepository and returns the GitHub repository, branch and directory (`spec.path`); `Explicit(repository, branch, directory)` for a location the caller names. Input is data the caller has read (typed structs or decoded objects via `Flux.Add`); the package talks to no cluster.
 - `sopsenc` — encryption of a repository's secret files. Files named `*secret*`/`*credential*` are SOPS-encrypted for the age recipients of the first matching creation rule of the repository's `.sops.yaml`, public keys only. Values declared as `Generated` are drawn from `crypto/rand` at commit time — once per name, so two files sharing a name carry the same value — and exist only in the encrypted output. A secret file that already exists in the repository is left untouched, never re-generated. The module holds no private key and has no decryption code path; a test fails the build if one appears.
+- `commit` — landing the files as the person. `Open` takes a `Remote` built from the caller's GitHub token, a `Request` (head branch, title, body) and one `Change` per location, and makes for every repository one branch, one commit with all of that repository's files and one pull request whose title and body are the caller's text — an open pull request of the same branch is reused. `Merge` merges as the person and is refused until the caller says approved and every status and check run on the head is green, and when the head is no longer the commit the caller saw; a repository's own protection — the approving review that satisfies `enforce_admins` and rulesets — applies at the merge call, and no administrative path exists. `Fake` is the in-process remote for tests, the module's and its callers'.
+
+## Who imports it
+
+The platform manager, `mctl`, the cluster manager and the agent manager: one implementation of "render, encrypt, commit, open the pull request, merge on approval" for every GitOps repository the platform writes to.
+
+## Identity
+
+The module holds no token, no App and no private key. Every call acts with the token the caller passes in — for the managers, the person's user token of the manager's GitHub App — so commits, pull requests and merges are the person's. A token GitHub refuses (401 or 403) surfaces as `commit.ErrAuth` with the status; the caller answers with its sign-in flow, and nothing is retried with another identity.

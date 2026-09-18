@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `provenance`: the owning GitHub repository, branch and directory of a target from its Flux Kustomization and GitRepository, or explicit.
 - `sopsenc`: SOPS encryption of `*secret*`/`*credential*` files for the age recipients of the repository's `.sops.yaml` creation rule, with generated values that exist only in the encrypted output; no decryption code path, asserted by a test.
+- `commit`: a branch, one commit per repository and the pull request with the caller's title and body, through a `Remote` built from the caller's token; the merge as the person, refused before the caller's approval, before green checks and when the head moved; a refused token as `ErrAuth` with the GitHub status; a `Fake` remote for tests.
 
 
 [Unreleased]: https://github.com/giantswarm/gitops-commit/tree/main
