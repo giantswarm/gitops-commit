@@ -27,7 +27,7 @@ const (
 func fixture(t *testing.T) (*Fake, Request, []Change) {
 	t.Helper()
 	f := NewFake()
-	f.AddBranch(repoA, "main", map[string][]byte{"README.md": []byte("hello")})
+	f.AddBranch(repoA, "main", map[string][]byte{readme: []byte("hello")})
 	f.AddBranch(repoB, "main", nil)
 	locA1 := location(t, repoA, "main", "management-clusters/example/dex")
 	locA2 := location(t, repoA, "main", "management-clusters/example/portal")
@@ -77,7 +77,7 @@ func TestOpenOneCommitPerRepositoryAndTheCallersBody(t *testing.T) {
 		}
 	}
 	tree := f.Files(repoA, req.Branch)
-	for _, want := range []string{"README.md", "management-clusters/example/dex/kustomization.yaml", "management-clusters/example/dex/secret.enc.yaml", "management-clusters/example/portal/values.yaml"} {
+	for _, want := range []string{readme, "management-clusters/example/dex/kustomization.yaml", "management-clusters/example/dex/secret.enc.yaml", "management-clusters/example/portal/values.yaml"} {
 		if _, ok := tree[want]; !ok {
 			t.Errorf("%s: %s missing from the head tree", repoA, want)
 		}
