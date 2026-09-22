@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -506,4 +507,64 @@ func parsePrivateKey(t *testing.T, pemText string) *ecdsa.PrivateKey {
 		t.Fatalf("private key is %T, want ECDSA P-256", key)
 	}
 	return private
+}
+
+// placeholderEncoded stands for the base64 of the shared value in the
+// consumer's file.
+const placeholderEncoded = "__DEX_CLIENT_SECRET_BASE64__"
+
+func TestEncryptEncodedPlaceholderReceivesTheBase64OfTheSharedValue(t *testing.T) {
+	fx := newFixture(t)
+	files := []File{
+		{
+			Path:      dexSecretPath,
+			Content:   secretYAML("dex-app", "clientSecret", placeholderDex),
+			Generated: []Generated{{Name: sharedName, Placeholder: placeholderDex, Kind: Base64, Length: 32}},
+		},
+		{
+			Path:      consumerSecretPath,
+			Content:   secretYAML("mcp", "clientSecret", placeholderEncoded),
+			Generated: []Generated{{Name: sharedName, Placeholder: placeholderEncoded, Kind: Base64, Length: 32, Encoding: EncodingBase64}},
+		},
+	}
+	out, err := fx.encryptor.Encrypt(files, nothingExists)
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	raw := stringDataValue(t, decrypt(t, out[dexSecretPath], fx.identity), "clientSecret")
+	encoded := stringDataValue(t, decrypt(t, out[consumerSecretPath], fx.identity), "clientSecret")
+	if raw == "" || raw == placeholderDex {
+		t.Fatalf("dex clientSecret not generated: %q", raw)
+	}
+	if encoded == raw {
+		t.Fatalf("the encoded placeholder received the raw value %q", raw)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatalf("consumer clientSecret is not base64: %q: %v", encoded, err)
+	}
+	if string(decoded) != raw {
+		t.Fatalf("consumer clientSecret decodes to %q, want the dex value %q", decoded, raw)
+	}
+}
+
+func TestEncryptValidationOfEncodings(t *testing.T) {
+	fx := newFixture(t)
+	cases := map[string]struct {
+		files []File
+		want  error
+	}{
+		"unknown encoding": {files: []File{{Path: dexSecretPath, Content: []byte("a: __P__\n"),
+			Generated: []Generated{{Name: "n", Placeholder: placeholderP, Kind: Base64, Length: 8, Encoding: "hex"}}}}, want: ErrInvalidGenerated},
+		"encoded key pair half": {files: []File{{Path: pluginKeysSecretPath, Content: []byte("a: __PRIVATE__\n"),
+			Generated: []Generated{{Name: pairName, Placeholder: placeholderPrivate, Kind: KeyPairES256, Half: Private, Encoding: EncodingBase64}}}}, want: ErrInvalidGenerated},
+	}
+	for label, tc := range cases {
+		t.Run(label, func(t *testing.T) {
+			_, err := fx.encryptor.Encrypt(tc.files, nothingExists)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("error = %v, want %v", err, tc.want)
+			}
+		})
+	}
 }
