@@ -42,6 +42,16 @@ const (
 	Public Half = "public"
 )
 
+// Encoding is how a placeholder receives its value: as it is (the zero
+// value), or encoded for a consumer that decodes the leaf.
+type Encoding string
+
+// EncodingBase64 is the value's standard base64 with padding: for a Secret
+// key written under data:, or a chart that copies the value under data: as
+// it is. It applies to a Base64 or Alphanumeric value; a key pair's halves
+// are quoted YAML scalars and take no encoding.
+const EncodingBase64 Encoding = "base64"
+
 const alphanumericAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 
 // ErrInvalidGenerated is returned for a Generated declaration that is
@@ -53,7 +63,9 @@ var ErrInvalidGenerated = errors.New("invalid generated value declaration")
 // writes in place of Placeholder in the declaring file. The same Name in two
 // files is one value; its Kind and Length must agree wherever it is declared.
 // A key pair's declarations name the Half each placeholder receives; its
-// private half exists only in the encrypted output.
+// private half exists only in the encrypted output. Each declaration names
+// the Encoding its placeholder receives: that is how one value lands as it
+// is where it is read and base64 where the consumer decodes it.
 type Generated struct {
 	Name        string
 	Placeholder string
@@ -63,11 +75,17 @@ type Generated struct {
 	// Half is the half of a KeyPairES256 the placeholder receives; a Base64 or
 	// Alphanumeric value has none.
 	Half Half
+	// Encoding is how the placeholder receives the value; empty is the value
+	// as generated.
+	Encoding Encoding
 }
 
 func (g Generated) validate() error {
 	if g.Name == "" || g.Placeholder == "" {
 		return fmt.Errorf("%w: name and placeholder are required (name %q)", ErrInvalidGenerated, g.Name)
+	}
+	if g.Encoding != "" && g.Encoding != EncodingBase64 {
+		return fmt.Errorf("%w: unknown encoding %q for %q", ErrInvalidGenerated, g.Encoding, g.Name)
 	}
 	switch g.Kind {
 	case Base64, Alphanumeric:
@@ -84,6 +102,9 @@ func (g Generated) validate() error {
 		}
 		if g.Half != Private && g.Half != Public {
 			return fmt.Errorf("%w: key pair %q must name the half %q or %q, not %q", ErrInvalidGenerated, g.Name, Private, Public, g.Half)
+		}
+		if g.Encoding != "" {
+			return fmt.Errorf("%w: key pair %q takes no encoding: its halves are quoted YAML scalars", ErrInvalidGenerated, g.Name)
 		}
 		return nil
 	default:
@@ -102,15 +123,22 @@ type material struct {
 	value, private, public string
 }
 
-// pick is the string the declaration's placeholder receives.
+// pick is the string the declaration's placeholder receives: the half of a
+// key pair or the value, in the declaration's encoding.
 func (g Generated) pick(m material) string {
+	var s string
 	switch g.Half {
 	case Private:
-		return m.private
+		s = m.private
 	case Public:
-		return m.public
+		s = m.public
+	default:
+		s = m.value
 	}
-	return m.value
+	if g.Encoding == EncodingBase64 {
+		return base64.StdEncoding.EncodeToString([]byte(s))
+	}
+	return s
 }
 
 // generate draws fresh material of the declared shape from crypto/rand.
