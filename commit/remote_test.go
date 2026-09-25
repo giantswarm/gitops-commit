@@ -17,13 +17,13 @@ const (
 func opened(t *testing.T, f *Fake, branch string, files map[string][]byte) PullRequest {
 	t.Helper()
 	ctx := context.Background()
-	if err := f.CreateBranch(ctx, repoA, branch, "main"); err != nil {
+	if err := f.CreateBranch(ctx, repoA, branch, mainBranch); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.Commit(ctx, repoA, branch, "change", files); err != nil {
 		t.Fatal(err)
 	}
-	pr, err := f.OpenPullRequest(ctx, repoA, branch, "main", "Change", actionID)
+	pr, err := f.OpenPullRequest(ctx, repoA, branch, mainBranch, "Change", actionID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ func TestFindPullRequestSeesOnlyTheOpenOne(t *testing.T) {
 	if _, found, _ := f.FindPullRequest(ctx, repoA, "feature"); found {
 		t.Error("a closed pull request is found")
 	}
-	if _, err := f.OpenPullRequest(ctx, repoA, "feature", "main", "Again", actionID); err != nil {
+	if _, err := f.OpenPullRequest(ctx, repoA, "feature", mainBranch, "Again", actionID); err != nil {
 		t.Fatal(err)
 	}
 	if prs := f.PullRequests(); len(prs) != 2 || !prs[0].Closed || prs[1].Closed {
@@ -58,14 +58,14 @@ func TestFindPullRequestSeesOnlyTheOpenOne(t *testing.T) {
 func TestOpenDraftPullRequestIsADraftAndReused(t *testing.T) {
 	f, _, _ := fixture(t)
 	ctx := context.Background()
-	if err := f.CreateBranch(ctx, repoA, "draft", "main"); err != nil {
+	if err := f.CreateBranch(ctx, repoA, "draft", mainBranch); err != nil {
 		t.Fatal(err)
 	}
-	pr, err := f.OpenDraftPullRequest(ctx, repoA, "draft", "main", "Draft", actionID)
+	pr, err := f.OpenDraftPullRequest(ctx, repoA, "draft", mainBranch, "Draft", actionID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	again, err := f.OpenPullRequest(ctx, repoA, "draft", "main", "Draft", actionID)
+	again, err := f.OpenPullRequest(ctx, repoA, "draft", mainBranch, "Draft", actionID)
 	if err != nil || again.Number != pr.Number {
 		t.Fatalf("second open: %+v %v", again, err)
 	}
@@ -129,7 +129,7 @@ func TestCloseIsIdempotentAndDeletesTheBranchOnRequest(t *testing.T) {
 func TestRevertInvertsTheMergedChangeOnTheTip(t *testing.T) {
 	f, _, _ := fixture(t)
 	ctx := context.Background()
-	f.AddBranch(repoA, "main", map[string][]byte{
+	f.AddBranch(repoA, mainBranch, map[string][]byte{
 		readme:     []byte("hello"),
 		sopsConfig: []byte("rules: [a]"),
 		"old.yaml": []byte("old"),
@@ -146,14 +146,14 @@ func TestRevertInvertsTheMergedChangeOnTheTip(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The tip moves on after the merge; the revert lands on top of it.
-	if err := f.Commit(ctx, repoA, "main", "later", map[string][]byte{"later.yaml": []byte("later")}); err != nil {
+	if err := f.Commit(ctx, repoA, mainBranch, "later", map[string][]byte{"later.yaml": []byte("later")}); err != nil {
 		t.Fatal(err)
 	}
 	revert, err := f.Revert(ctx, pr, "Reverts the change.", map[string][]byte{sopsConfig: []byte("rules: [a, c]")})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if revert.Head != "revert-1-feature" || revert.Base != "main" {
+	if revert.Head != "revert-1-feature" || revert.Base != mainBranch {
 		t.Errorf("revert branch/base: %+v", revert)
 	}
 	files := f.Files(repoA, revert.Head)
@@ -182,13 +182,13 @@ func TestRevertInvertsTheMergedChangeOnTheTip(t *testing.T) {
 func TestRevertRefusesAMergeThatChangedNothing(t *testing.T) {
 	f, _, _ := fixture(t)
 	ctx := context.Background()
-	if err := f.CreateBranch(ctx, repoA, "same", "main"); err != nil {
+	if err := f.CreateBranch(ctx, repoA, "same", mainBranch); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.Commit(ctx, repoA, "same", "same", map[string][]byte{readme: []byte("hello")}); err != nil {
 		t.Fatal(err)
 	}
-	pr, err := f.OpenPullRequest(ctx, repoA, "same", "main", "Same", actionID)
+	pr, err := f.OpenPullRequest(ctx, repoA, "same", mainBranch, "Same", actionID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -249,5 +249,41 @@ func TestApproveRecordsTheReviewAndTheRollup(t *testing.T) {
 	}
 	if err := f.Approve(ctx, PullRequest{Repository: repoA, Number: 99}, "x"); err == nil {
 		t.Error("an unknown pull request took an approval")
+	}
+}
+
+func TestCommitRemovesAPathWhoseContentIsNil(t *testing.T) {
+	f := NewFake()
+	f.AddBranch(repoA, mainBranch, map[string][]byte{poolPath: []byte("pool"), kustomizationPath: []byte("resources: [pool.yaml]")})
+	ctx := context.Background()
+	if err := f.CreateBranch(ctx, repoA, "remove-pool", mainBranch); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Commit(ctx, repoA, "remove-pool", "remove the pool", map[string][]byte{poolPath: nil, kustomizationPath: []byte("resources: []")}); err != nil {
+		t.Fatal(err)
+	}
+	files := f.Files(repoA, "remove-pool")
+	if _, ok := files[poolPath]; ok {
+		t.Error("a/pool.yaml is still in the tree")
+	}
+	if got := string(files[kustomizationPath]); got != "resources: []" {
+		t.Errorf("kustomization.yaml = %q", got)
+	}
+}
+
+func TestFakeReadFileAtTheBranchHead(t *testing.T) {
+	f := NewFake()
+	f.AddBranch(repoA, mainBranch, map[string][]byte{".sops.yaml": []byte("creation_rules: []")})
+	ctx := context.Background()
+	got, err := f.ReadFile(ctx, repoA, mainBranch, ".sops.yaml")
+	if err != nil || string(got) != "creation_rules: []" {
+		t.Fatalf("ReadFile = %q, %v", got, err)
+	}
+	if _, err := f.ReadFile(ctx, repoA, mainBranch, "missing.yaml"); !errors.Is(err, ErrFileNotFound) {
+		t.Errorf("missing file: want ErrFileNotFound, got %v", err)
+	}
+	f.Fail[OpReadFile] = &AuthError{Op: OpReadFile, Status: 401}
+	if _, err := f.ReadFile(ctx, repoA, mainBranch, ".sops.yaml"); !errors.Is(err, ErrAuth) {
+		t.Errorf("Fail: want ErrAuth, got %v", err)
 	}
 }

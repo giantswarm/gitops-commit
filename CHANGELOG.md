@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `commit`: a path whose content is nil is removed in the commit; `ReadFile` (the `Reader` seam of `GitHub` and `Fake`) reads a file at a branch's head and answers `ErrFileNotFound` for a missing one.
 - `sopsenc`: a `Generated` declaration names the `Encoding` its placeholder receives — the value as it is, or its standard base64 (`EncodingBase64`) where the consumer decodes the leaf — so one generated value lands raw in the file that reads it and encoded in the file whose consumer decodes it.
 - `provenance`: the owning GitHub repository, branch and directory of a target from its Flux Kustomization and GitRepository, or explicit.
 - `sopsenc`: SOPS encryption of `*secret*`/`*credential*` files for the age recipients of the repository's `.sops.yaml` creation rule, with generated values that exist only in the encrypted output; no decryption code path, asserted by a test.

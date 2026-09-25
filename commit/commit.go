@@ -25,6 +25,7 @@ type Repository = provenance.Repository
 // Change is the set of files for one location: the repository, the base
 // branch and the repository-relative paths the files land at (the keys of
 // what sopsenc.Encrypt returns). Changes for one repository become one commit.
+// A path whose content is nil is removed from the repository.
 type Change struct {
 	Location provenance.Location
 	Files    map[string][]byte
@@ -81,7 +82,8 @@ type Status struct {
 type Remote interface {
 	// CreateBranch creates branch from base; a branch that exists is left as it is.
 	CreateBranch(ctx context.Context, repo Repository, branch, base string) error
-	// Commit adds one commit with files to branch.
+	// Commit adds one commit with files to branch; a path whose content is
+	// nil is removed.
 	Commit(ctx context.Context, repo Repository, branch, message string, files map[string][]byte) error
 	// OpenPullRequest opens head against base, or returns the open pull request head already has.
 	OpenPullRequest(ctx context.Context, repo Repository, head, base, title, body string) (PullRequest, error)
@@ -111,6 +113,16 @@ type Remote interface {
 	Revert(ctx context.Context, pr PullRequest, body string, overrides map[string][]byte) (PullRequest, error)
 }
 
+// Reader reads a repository's files at a branch: what a caller renders
+// against before it lands a change — the kustomization.yaml it extends, the
+// .sops.yaml it encrypts for, whether a file it would remove exists. GitHub
+// and Fake implement it.
+type Reader interface {
+	// ReadFile returns the content of path at the head of branch, or
+	// ErrFileNotFound.
+	ReadFile(ctx context.Context, repo Repository, branch, path string) ([]byte, error)
+}
+
 // Operation names of the remote calls, carried by AuthError and by Fake.Fail.
 const (
 	OpCreateBranch    = "create branch"
@@ -123,6 +135,7 @@ const (
 	OpEnableAutoMerge = "enable auto-merge"
 	OpClose           = "close pull request"
 	OpRevert          = "revert pull request"
+	OpReadFile        = "read file"
 )
 
 var (
@@ -149,6 +162,8 @@ var (
 	ErrNotMerged = errors.New("revert refused: the pull request is not merged")
 	// ErrNothingToRevert: the merged pull request changed no files.
 	ErrNothingToRevert = errors.New("revert refused: the pull request changed no files")
+	// ErrFileNotFound: the branch carries no file at the path.
+	ErrFileNotFound = errors.New("no such file")
 )
 
 // revertBranch, revertTitle and revertMessage name what Revert makes, the same

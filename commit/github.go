@@ -90,7 +90,8 @@ func (g *GitHub) CreateBranch(ctx context.Context, repo Repository, branch, base
 }
 
 // Commit writes one commit with files on top of branch: blobs, a tree on the
-// head's tree, the commit, and a fast-forward of the branch.
+// head's tree, the commit, and a fast-forward of the branch. A nil content
+// removes the path from the tree.
 func (g *GitHub) Commit(ctx context.Context, repo Repository, branch, message string, files map[string][]byte) error {
 	if len(files) == 0 {
 		return ErrNoFiles
@@ -107,6 +108,10 @@ func (g *GitHub) Commit(ctx context.Context, repo Repository, branch, message st
 	paths := slices.Sorted(maps.Keys(files))
 	entries := make([]*github.TreeEntry, 0, len(paths))
 	for _, path := range paths {
+		if files[path] == nil {
+			entries = append(entries, deletedEntry(path))
+			continue
+		}
 		blob, _, err := g.gh.Git.CreateBlob(ctx, repo.Owner, repo.Name, github.Blob{
 			Content:  github.Ptr(base64.StdEncoding.EncodeToString(files[path])),
 			Encoding: github.Ptr("base64"),
@@ -450,6 +455,26 @@ func (g *GitHub) blobEntry(ctx context.Context, repo Repository, path string, co
 		return nil, wrap(OpRevert, err)
 	}
 	return &github.TreeEntry{Path: github.Ptr(path), Mode: github.Ptr(blobMode), Type: github.Ptr(blobType), SHA: github.Ptr(blob.GetSHA())}, nil
+}
+
+// ReadFile returns the content of path at the head of branch, through the
+// Git blob so a file past the contents API's 1 MB inline limit reads whole.
+func (g *GitHub) ReadFile(ctx context.Context, repo Repository, branch, path string) ([]byte, error) {
+	file, _, _, err := g.gh.Repositories.GetContents(ctx, repo.Owner, repo.Name, path, &github.RepositoryContentGetOptions{Ref: branch})
+	if hasStatus(err, http.StatusNotFound) {
+		return nil, fmt.Errorf("%s %s/%s@%s: %w", OpReadFile, repo, path, branch, ErrFileNotFound)
+	}
+	if err != nil {
+		return nil, wrap(OpReadFile, err)
+	}
+	if file == nil || file.GetType() != "file" {
+		return nil, fmt.Errorf("%s %s/%s@%s: not a file: %w", OpReadFile, repo, path, branch, ErrFileNotFound)
+	}
+	raw, _, err := g.gh.Git.GetBlobRaw(ctx, repo.Owner, repo.Name, file.GetSHA())
+	if err != nil {
+		return nil, wrap(OpReadFile, err)
+	}
+	return raw, nil
 }
 
 // deletedEntry removes path from the tree: an entry without sha and content.

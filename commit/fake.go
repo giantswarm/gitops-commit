@@ -154,9 +154,33 @@ func (f *Fake) Commit(_ context.Context, repo Repository, branch, message string
 	if tree == nil {
 		tree = map[string][]byte{}
 	}
-	maps.Copy(tree, files)
+	for path, content := range files {
+		if content == nil {
+			delete(tree, path)
+			continue
+		}
+		tree[path] = content
+	}
 	f.write(repo, branch, message, parent, tree)
 	return nil
+}
+
+// ReadFile implements Reader.
+func (f *Fake) ReadFile(_ context.Context, repo Repository, branch, path string) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.Fail[OpReadFile]; err != nil {
+		return nil, err
+	}
+	sha, ok := f.heads[key(repo, branch)]
+	if !ok {
+		return nil, fmt.Errorf("%s: %s has no branch %q", OpReadFile, repo, branch)
+	}
+	content, ok := f.commits[sha].Files[path]
+	if !ok {
+		return nil, fmt.Errorf("%s %s/%s@%s: %w", OpReadFile, repo, path, branch, ErrFileNotFound)
+	}
+	return slices.Clone(content), nil
 }
 
 // OpenPullRequest implements Remote.

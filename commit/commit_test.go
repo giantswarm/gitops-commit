@@ -20,18 +20,24 @@ var (
 )
 
 const (
-	generatedContent = "gen-3f9a1c7e-not-for-logs"
-	actionID         = "action 0f6b2d; approved in the team review"
+	mainBranch        = "main"
+	kustomizationPath = "a/kustomization.yaml"
+	poolPath          = "a/pool.yaml"
+	shaKey            = "sha"
+	headSHA           = "head"
+	refKey            = "ref"
+	generatedContent  = "gen-3f9a1c7e-not-for-logs"
+	actionID          = "action 0f6b2d; approved in the team review"
 )
 
 func fixture(t *testing.T) (*Fake, Request, []Change) {
 	t.Helper()
 	f := NewFake()
-	f.AddBranch(repoA, "main", map[string][]byte{readme: []byte("hello")})
-	f.AddBranch(repoB, "main", nil)
-	locA1 := location(t, repoA, "main", "management-clusters/example/dex")
-	locA2 := location(t, repoA, "main", "management-clusters/example/portal")
-	locB := location(t, repoB, "main", "")
+	f.AddBranch(repoA, mainBranch, map[string][]byte{readme: []byte("hello")})
+	f.AddBranch(repoB, mainBranch, nil)
+	locA1 := location(t, repoA, mainBranch, "management-clusters/example/dex")
+	locA2 := location(t, repoA, mainBranch, "management-clusters/example/portal")
+	locB := location(t, repoB, mainBranch, "")
 	changes := []Change{
 		{Location: locA1, Files: map[string][]byte{path(t, locA1, "kustomization.yaml"): []byte("resources: [a]"), path(t, locA1, "secret.enc.yaml"): []byte(generatedContent)}},
 		{Location: locA2, Files: map[string][]byte{path(t, locA2, "values.yaml"): []byte("portal: on")}},
@@ -93,7 +99,7 @@ func TestOpenOneCommitPerRepositoryAndTheCallersBody(t *testing.T) {
 		if held[i].Body != actionID || held[i].Title != req.Title {
 			t.Errorf("%s#%d: title %q body %q, want the caller's", pr.Repository, pr.Number, held[i].Title, held[i].Body)
 		}
-		if pr.Head != req.Branch || pr.Base != "main" || pr.HeadSHA == "" {
+		if pr.Head != req.Branch || pr.Base != mainBranch || pr.HeadSHA == "" {
 			t.Errorf("%s#%d: head %q base %q sha %q", pr.Repository, pr.Number, pr.Head, pr.Base, pr.HeadSHA)
 		}
 	}
@@ -176,7 +182,7 @@ func TestMergeRefusedBeforeApprovalAndBeforeGreen(t *testing.T) {
 	if err := Merge(ctx, f, pr, true); err != nil {
 		t.Errorf("merging a merged pull request: %v", err)
 	}
-	if got := f.Files(repoA, "main")["management-clusters/example/dex/kustomization.yaml"]; string(got) != "resources: [a]" {
+	if got := f.Files(repoA, mainBranch)["management-clusters/example/dex/kustomization.yaml"]; string(got) != "resources: [a]" {
 		t.Error("main does not carry the merged files")
 	}
 }
