@@ -251,3 +251,39 @@ func TestApproveRecordsTheReviewAndTheRollup(t *testing.T) {
 		t.Error("an unknown pull request took an approval")
 	}
 }
+
+func TestCommitRemovesAPathWhoseContentIsNil(t *testing.T) {
+	f := NewFake()
+	f.AddBranch(repoA, "main", map[string][]byte{"a/pool.yaml": []byte("pool"), "a/kustomization.yaml": []byte("resources: [pool.yaml]")})
+	ctx := context.Background()
+	if err := f.CreateBranch(ctx, repoA, "remove-pool", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Commit(ctx, repoA, "remove-pool", "remove the pool", map[string][]byte{"a/pool.yaml": nil, "a/kustomization.yaml": []byte("resources: []")}); err != nil {
+		t.Fatal(err)
+	}
+	files := f.Files(repoA, "remove-pool")
+	if _, ok := files["a/pool.yaml"]; ok {
+		t.Error("a/pool.yaml is still in the tree")
+	}
+	if got := string(files["a/kustomization.yaml"]); got != "resources: []" {
+		t.Errorf("kustomization.yaml = %q", got)
+	}
+}
+
+func TestFakeReadFileAtTheBranchHead(t *testing.T) {
+	f := NewFake()
+	f.AddBranch(repoA, "main", map[string][]byte{".sops.yaml": []byte("creation_rules: []")})
+	ctx := context.Background()
+	got, err := f.ReadFile(ctx, repoA, "main", ".sops.yaml")
+	if err != nil || string(got) != "creation_rules: []" {
+		t.Fatalf("ReadFile = %q, %v", got, err)
+	}
+	if _, err := f.ReadFile(ctx, repoA, "main", "missing.yaml"); !errors.Is(err, ErrFileNotFound) {
+		t.Errorf("missing file: want ErrFileNotFound, got %v", err)
+	}
+	f.Fail[OpReadFile] = &AuthError{Op: OpReadFile, Status: 401}
+	if _, err := f.ReadFile(ctx, repoA, "main", ".sops.yaml"); !errors.Is(err, ErrAuth) {
+		t.Errorf("Fail: want ErrAuth, got %v", err)
+	}
+}

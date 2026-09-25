@@ -225,3 +225,81 @@ func TestGitHubApproveRefusedIsAnAuthError(t *testing.T) {
 		t.Errorf("want AuthError{%s, 403}, got %v", OpApprove, err)
 	}
 }
+
+func TestGitHubCommitRemovesAPathWhoseContentIsNil(t *testing.T) {
+	mux, gh := server(t)
+	mux.HandleFunc("/api/v3/repos/acme/management-clusters/git/ref/heads/remove-pool", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, map[string]any{"ref": "refs/heads/remove-pool", "object": map[string]any{"sha": "head"}})
+	})
+	mux.HandleFunc("/api/v3/repos/acme/management-clusters/git/commits/head", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, map[string]any{"sha": "head", "tree": map[string]any{"sha": "tree0"}})
+	})
+	blobs := 0
+	mux.HandleFunc("/api/v3/repos/acme/management-clusters/git/blobs", func(w http.ResponseWriter, _ *http.Request) {
+		blobs++
+		writeJSON(t, w, map[string]any{"sha": "blob1"})
+	})
+	var tree struct {
+		BaseTree string           `json:"base_tree"`
+		Tree     []map[string]any `json:"tree"`
+	}
+	mux.HandleFunc("/api/v3/repos/acme/management-clusters/git/trees", func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&tree); err != nil {
+			t.Error(err)
+		}
+		writeJSON(t, w, map[string]any{"sha": "tree1"})
+	})
+	mux.HandleFunc("/api/v3/repos/acme/management-clusters/git/commits", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, map[string]any{"sha": "commit1"})
+	})
+	mux.HandleFunc("/api/v3/repos/acme/management-clusters/git/refs/heads/remove-pool", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, map[string]any{"ref": "refs/heads/remove-pool", "object": map[string]any{"sha": "commit1"}})
+	})
+	err := gh.Commit(context.Background(), repoA, "remove-pool", "remove the pool", map[string][]byte{
+		"a/kustomization.yaml": []byte("resources: []"),
+		"a/pool.yaml":          nil,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if blobs != 1 {
+		t.Errorf("blobs created = %d, want 1 (none for the removed path)", blobs)
+	}
+	if len(tree.Tree) != 2 {
+		t.Fatalf("tree entries = %v", tree.Tree)
+	}
+	removed := tree.Tree[1]
+	if removed["path"] != "a/pool.yaml" || removed["sha"] != nil || removed["content"] != nil {
+		t.Errorf("removed entry = %v, want path a/pool.yaml without sha or content", removed)
+	}
+	if _, ok := removed["sha"]; !ok {
+		t.Errorf("removed entry %v omits sha: GitHub keeps the file unless sha is null", removed)
+	}
+}
+
+func TestGitHubReadFileReadsTheBlobAndAnswersNotFound(t *testing.T) {
+	mux, gh := server(t)
+	mux.HandleFunc("/api/v3/repos/acme/management-clusters/contents/a/kustomization.yaml", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("ref") != "main" {
+			t.Errorf("ref = %q", r.URL.Query().Get("ref"))
+		}
+		writeJSON(t, w, map[string]any{"type": "file", "sha": "blob9", "path": "a/kustomization.yaml"})
+	})
+	mux.HandleFunc("/api/v3/repos/acme/management-clusters/git/blobs/blob9", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("resources: [pool.yaml]"))
+	})
+	mux.HandleFunc("/api/v3/repos/acme/management-clusters/contents/missing.yaml", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
+	})
+	ctx := context.Background()
+	got, err := gh.ReadFile(ctx, repoA, "main", "a/kustomization.yaml")
+	if err != nil || string(got) != "resources: [pool.yaml]" {
+		t.Fatalf("ReadFile = %q, %v", got, err)
+	}
+	if _, err := gh.ReadFile(ctx, repoA, "main", "missing.yaml"); !errors.Is(err, ErrFileNotFound) {
+		t.Errorf("missing: want ErrFileNotFound, got %v", err)
+	}
+	if _, err := refusing(t, http.StatusUnauthorized).ReadFile(ctx, repoA, "main", "x"); !errors.Is(err, ErrAuth) {
+		t.Errorf("refused: want ErrAuth, got %v", err)
+	}
+}
