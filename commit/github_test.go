@@ -229,7 +229,7 @@ func TestGitHubApproveRefusedIsAnAuthError(t *testing.T) {
 func TestGitHubCommitRemovesAPathWhoseContentIsNil(t *testing.T) {
 	mux, gh := server(t)
 	mux.HandleFunc("/api/v3/repos/acme/management-clusters/git/ref/heads/remove-pool", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(t, w, map[string]any{"ref": "refs/heads/remove-pool", "object": map[string]any{shaKey: headSHA}})
+		writeJSON(t, w, map[string]any{refKey: "refs/heads/remove-pool", "object": map[string]any{shaKey: headSHA}})
 	})
 	mux.HandleFunc("/api/v3/repos/acme/management-clusters/git/commits/"+headSHA, func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(t, w, map[string]any{shaKey: headSHA, "tree": map[string]any{shaKey: "tree0"}})
@@ -253,7 +253,7 @@ func TestGitHubCommitRemovesAPathWhoseContentIsNil(t *testing.T) {
 		writeJSON(t, w, map[string]any{shaKey: "commit1"})
 	})
 	mux.HandleFunc("/api/v3/repos/acme/management-clusters/git/refs/heads/remove-pool", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(t, w, map[string]any{"ref": "refs/heads/remove-pool", "object": map[string]any{shaKey: "commit1"}})
+		writeJSON(t, w, map[string]any{refKey: "refs/heads/remove-pool", "object": map[string]any{shaKey: "commit1"}})
 	})
 	err := gh.Commit(context.Background(), repoA, "remove-pool", "remove the pool", map[string][]byte{
 		kustomizationPath: []byte("resources: []"),
@@ -280,8 +280,8 @@ func TestGitHubCommitRemovesAPathWhoseContentIsNil(t *testing.T) {
 func TestGitHubReadFileReadsTheBlobAndAnswersNotFound(t *testing.T) {
 	mux, gh := server(t)
 	mux.HandleFunc("/api/v3/repos/acme/management-clusters/contents/a/kustomization.yaml", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("ref") != mainBranch {
-			t.Errorf("ref = %q", r.URL.Query().Get("ref"))
+		if r.URL.Query().Get(refKey) != mainBranch {
+			t.Errorf("ref = %q", r.URL.Query().Get(refKey))
 		}
 		writeJSON(t, w, map[string]any{"type": "file", shaKey: "blob9", "path": kustomizationPath})
 	})

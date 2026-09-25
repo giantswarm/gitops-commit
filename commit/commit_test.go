@@ -25,6 +25,7 @@ const (
 	poolPath          = "a/pool.yaml"
 	shaKey            = "sha"
 	headSHA           = "head"
+	refKey            = "ref"
 	generatedContent  = "gen-3f9a1c7e-not-for-logs"
 	actionID          = "action 0f6b2d; approved in the team review"
 )
