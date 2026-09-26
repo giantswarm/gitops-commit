@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `provenance`: a GitRepository on GitHub's SSH endpoint on port 443 (`ssh://git@ssh.github.com:443/owner/name.git`, for networks that block port 22) names its GitHub repository; `ParseRepositoryURL` refused the host `ssh.github.com` as not GitHub, so a target reconciled from such a source had no commit target.
+
 ### Changed
 
 - `sopsenc`: which files are secret files follows the repository's `.sops.yaml` — a file a creation rule's `path_regex` matches is encrypted whatever its name (`secrets/api-key.yaml` by its directory); a `*secret*`/`*credential*`-named file no rule covers is refused, never written in plaintext; kustomize's entry-point files stay plaintext. `Config.IsSecretFile` and `Encryptor.IsSecretFile` expose the decision.
