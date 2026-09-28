@@ -113,17 +113,17 @@ func (g *GitHub) Commit(ctx context.Context, repo Repository, branch, message st
 			continue
 		}
 		blob, _, err := g.gh.Git.CreateBlob(ctx, repo.Owner, repo.Name, github.Blob{
-			Content:  github.Ptr(base64.StdEncoding.EncodeToString(files[path])),
-			Encoding: github.Ptr("base64"),
+			Content:  new(base64.StdEncoding.EncodeToString(files[path])),
+			Encoding: new("base64"),
 		})
 		if err != nil {
 			return wrap(OpCommit, err)
 		}
 		entries = append(entries, &github.TreeEntry{
-			Path: github.Ptr(path),
-			Mode: github.Ptr(blobMode),
-			Type: github.Ptr(blobType),
-			SHA:  github.Ptr(blob.GetSHA()),
+			Path: new(path),
+			Mode: new(blobMode),
+			Type: new(blobType),
+			SHA:  new(blob.GetSHA()),
 		})
 	}
 	tree, _, err := g.gh.Git.CreateTree(ctx, repo.Owner, repo.Name, head.GetTree().GetSHA(), entries)
@@ -131,9 +131,9 @@ func (g *GitHub) Commit(ctx context.Context, repo Repository, branch, message st
 		return wrap(OpCommit, err)
 	}
 	commit, _, err := g.gh.Git.CreateCommit(ctx, repo.Owner, repo.Name, github.Commit{
-		Message: github.Ptr(message),
-		Tree:    &github.Tree{SHA: github.Ptr(tree.GetSHA())},
-		Parents: []*github.Commit{{SHA: github.Ptr(headSHA)}},
+		Message: new(message),
+		Tree:    &github.Tree{SHA: new(tree.GetSHA())},
+		Parents: []*github.Commit{{SHA: new(headSHA)}},
 	}, nil)
 	if err != nil {
 		return wrap(OpCommit, err)
@@ -157,12 +157,12 @@ func (g *GitHub) OpenDraftPullRequest(ctx context.Context, repo Repository, head
 }
 
 func (g *GitHub) openPullRequest(ctx context.Context, repo Repository, head, base, title, body string, draft bool) (PullRequest, error) {
-	pr, _, err := g.gh.PullRequests.Create(ctx, repo.Owner, repo.Name, &github.NewPullRequest{
-		Title: github.Ptr(title),
-		Head:  github.Ptr(head),
-		Base:  github.Ptr(base),
-		Body:  github.Ptr(body),
-		Draft: github.Ptr(draft),
+	pr, _, err := g.gh.PullRequests.Create(ctx, repo.Owner, repo.Name, github.CreatePullRequest{
+		Title: new(title),
+		Head:  head,
+		Base:  base,
+		Body:  new(body),
+		Draft: new(draft),
 	})
 	if err == nil {
 		return toPullRequest(repo, pr), nil
@@ -318,7 +318,7 @@ func (g *GitHub) Close(ctx context.Context, pr PullRequest, deleteBranch bool) e
 	if got.GetState() == "closed" {
 		return nil
 	}
-	_, _, err = g.gh.PullRequests.Edit(ctx, pr.Repository.Owner, pr.Repository.Name, pr.Number, &github.PullRequest{State: github.Ptr("closed")})
+	_, _, err = g.gh.PullRequests.Edit(ctx, pr.Repository.Owner, pr.Repository.Name, pr.Number, &github.PullRequest{State: new("closed")})
 	if err != nil {
 		return wrap(OpClose, err)
 	}
@@ -382,9 +382,9 @@ func (g *GitHub) Revert(ctx context.Context, pr PullRequest, body string, overri
 	}
 	pr.Head = got.GetHead().GetRef()
 	commit, _, err := g.gh.Git.CreateCommit(ctx, owner, name, github.Commit{
-		Message: github.Ptr(revertMessage(pr, got.GetTitle(), body)),
-		Tree:    &github.Tree{SHA: github.Ptr(tree.GetSHA())},
-		Parents: []*github.Commit{{SHA: github.Ptr(tipSHA)}},
+		Message: new(revertMessage(pr, got.GetTitle(), body)),
+		Tree:    &github.Tree{SHA: new(tree.GetSHA())},
+		Parents: []*github.Commit{{SHA: new(tipSHA)}},
 	}, nil)
 	if err != nil {
 		return PullRequest{}, wrap(OpRevert, err)
@@ -448,13 +448,13 @@ func (g *GitHub) restoredEntry(ctx context.Context, repo Repository, sha, path s
 
 func (g *GitHub) blobEntry(ctx context.Context, repo Repository, path string, content []byte) (*github.TreeEntry, error) {
 	blob, _, err := g.gh.Git.CreateBlob(ctx, repo.Owner, repo.Name, github.Blob{
-		Content:  github.Ptr(base64.StdEncoding.EncodeToString(content)),
-		Encoding: github.Ptr("base64"),
+		Content:  new(base64.StdEncoding.EncodeToString(content)),
+		Encoding: new("base64"),
 	})
 	if err != nil {
 		return nil, wrap(OpRevert, err)
 	}
-	return &github.TreeEntry{Path: github.Ptr(path), Mode: github.Ptr(blobMode), Type: github.Ptr(blobType), SHA: github.Ptr(blob.GetSHA())}, nil
+	return &github.TreeEntry{Path: new(path), Mode: new(blobMode), Type: new(blobType), SHA: new(blob.GetSHA())}, nil
 }
 
 // ReadFile returns the content of path at the head of branch, through the
@@ -479,7 +479,7 @@ func (g *GitHub) ReadFile(ctx context.Context, repo Repository, branch, path str
 
 // deletedEntry removes path from the tree: an entry without sha and content.
 func deletedEntry(path string) *github.TreeEntry {
-	return &github.TreeEntry{Path: github.Ptr(path), Mode: github.Ptr(blobMode), Type: github.Ptr(blobType)}
+	return &github.TreeEntry{Path: new(path), Mode: new(blobMode), Type: new(blobType)}
 }
 
 // reviewState folds the reviews into the latest stance per reviewer.
@@ -597,9 +597,9 @@ func hasStatus(err error, code int) bool {
 // pinned to pr.HeadSHA when the caller names it. GitHub applies its own
 // rules to the call: the author of a pull request cannot approve it.
 func (g *GitHub) Approve(ctx context.Context, pr PullRequest, body string) error {
-	review := &github.PullRequestReviewRequest{Event: github.Ptr("APPROVE"), Body: github.Ptr(body)}
+	review := &github.PullRequestReviewRequest{Event: new("APPROVE"), Body: new(body)}
 	if pr.HeadSHA != "" {
-		review.CommitID = github.Ptr(pr.HeadSHA)
+		review.CommitID = new(pr.HeadSHA)
 	}
 	if _, _, err := g.gh.PullRequests.CreateReview(ctx, pr.Repository.Owner, pr.Repository.Name, pr.Number, review); err != nil {
 		return wrap(OpApprove, err)
