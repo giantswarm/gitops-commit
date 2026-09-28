@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Dependencies with known vulnerabilities bumped (nancy): golang.org/x/crypto v0.57.0, google.golang.org/grpc v1.84.0, go.opentelemetry.io/otel and otel/sdk v1.46.0, go.mongodb.org/mongo-driver v1.17.10.
+
 - `provenance`: a GitRepository on GitHub's SSH endpoint on port 443 (`ssh://git@ssh.github.com:443/owner/name.git`, for networks that block port 22) names its GitHub repository; `ParseRepositoryURL` refused the host `ssh.github.com` as not GitHub, so a target reconciled from such a source had no commit target.
 
 ### Changed
@@ -18,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `sopsenc`: which files are secret files follows the repository's `.sops.yaml` — a file a creation rule's `path_regex` matches is encrypted whatever its name (`secrets/api-key.yaml` by its directory); a `*secret*`/`*credential*`-named file no rule covers is refused, never written in plaintext; kustomize's entry-point files stay plaintext. `Config.IsSecretFile` and `Encryptor.IsSecretFile` expose the decision.
 
 ### Added
+
+- `layout`: a writer's directory in a GitOps repository and what one write changes there — one file per object (`Directory.ObjectFile`, a Secret in a secret file), the directory's own `kustomization.yaml` listing them and the parent's entry for the directory, both edited with comments kept and removed with the last file; `Build` decides every file against the base (add, update, remove, unchanged), encrypts new secret files for the repository's `.sops.yaml` and never re-encrypts one that exists, refuses secret files the repository cannot take encrypted (`SecretError`), and hands `commit.Open` its `Change`. The layout cluster-manager's commit mode established, for every manager.
 
 - `commit`: a path whose content is nil is removed in the commit; `ReadFile` (the `Reader` seam of `GitHub` and `Fake`) reads a file at a branch's head and answers `ErrFileNotFound` for a missing one.
 - `sopsenc`: a `Generated` declaration names the `Encoding` its placeholder receives — the value as it is, or its standard base64 (`EncodingBase64`) where the consumer decodes the leaf — so one generated value lands raw in the file that reads it and encoded in the file whose consumer decodes it.
