@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `layout`: a writer's directory in a GitOps repository and what one write changes there — one file per object (`Directory.ObjectFile`, a Secret in a secret file), the directory's own `kustomization.yaml` listing them and the parent's entry for the directory, both edited with comments kept and removed with the last file; `Build` decides every file against the base (add, update, remove, unchanged), encrypts new secret files for the repository's `.sops.yaml` and never re-encrypts one that exists, refuses secret files the repository cannot take encrypted (`SecretError`), and hands `commit.Open` its `Change`. The layout cluster-manager's commit mode established, for every manager.
+
 - `commit`: a path whose content is nil is removed in the commit; `ReadFile` (the `Reader` seam of `GitHub` and `Fake`) reads a file at a branch's head and answers `ErrFileNotFound` for a missing one.
 - `sopsenc`: a `Generated` declaration names the `Encoding` its placeholder receives — the value as it is, or its standard base64 (`EncodingBase64`) where the consumer decodes the leaf — so one generated value lands raw in the file that reads it and encoded in the file whose consumer decodes it.
 - `provenance`: the owning GitHub repository, branch and directory of a target from its Flux Kustomization and GitRepository, or explicit.
