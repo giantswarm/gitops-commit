@@ -140,6 +140,7 @@ func TestParseRepositoryURL(t *testing.T) {
 		"ssh://git@github.com/example-org/example-config.git",
 		"git@github.com:example-org/example-config.git",
 		"https://GitHub.com/example-org/example-config/",
+		"ssh://git@ssh.github.com:443/example-org/example-config.git",
 	} {
 		got, err := ParseRepositoryURL(raw)
 		if err != nil || got != want {
@@ -148,6 +149,7 @@ func TestParseRepositoryURL(t *testing.T) {
 	}
 	for _, raw := range []string{
 		"https://gitlab.com/example-org/example-config.git",
+		"ssh://git@ssh.gitlab.com:443/example-org/example-config.git",
 		"https://github.com/example-org",
 		"https://github.com/example-org/repo/extra",
 		"not-a-url",

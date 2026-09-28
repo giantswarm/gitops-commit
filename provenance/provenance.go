@@ -15,6 +15,9 @@ import (
 
 const (
 	gitHubHost = "github.com"
+	// gitHubSSHOver443Host is GitHub's SSH endpoint on port 443, for networks
+	// that block port 22 (ssh://git@ssh.github.com:443/owner/name.git).
+	gitHubSSHOver443Host = "ssh.github.com"
 	// KindGitRepository is the only Flux source kind a commit can target.
 	KindGitRepository = "GitRepository"
 )
@@ -176,13 +179,14 @@ func Explicit(repository, branch, directory string) (Location, error) {
 }
 
 // ParseRepositoryURL returns the GitHub repository a Flux GitRepository URL
-// names, in its https, ssh:// or scp-like git@ form, with or without ".git".
+// names, in its https, ssh:// or scp-like git@ form, with or without ".git",
+// on github.com or on GitHub's SSH endpoint on port 443, ssh.github.com.
 func ParseRepositoryURL(raw string) (Repository, error) {
 	host, repoPath, err := splitURL(raw)
 	if err != nil {
 		return Repository{}, err
 	}
-	if !strings.EqualFold(host, gitHubHost) {
+	if !strings.EqualFold(host, gitHubHost) && !strings.EqualFold(host, gitHubSSHOver443Host) {
 		return Repository{}, fmt.Errorf("%w: host %q in %q", ErrNotGitHub, host, raw)
 	}
 	repoPath = strings.TrimSuffix(strings.Trim(repoPath, "/"), ".git")
