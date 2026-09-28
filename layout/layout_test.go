@@ -19,7 +19,7 @@ var repo = provenance.Repository{Owner: "acme", Name: "fleet"}
 const (
 	parentKustomization = "# the org's clusters\napiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - cluster.yaml # the cluster\n"
 	plainFile           = "clusters/org-acme/model-manager/qwen.yaml"
-	encFile          = "clusters/org-acme/model-manager/qwen-secret.enc.yaml"
+	encFile             = "clusters/org-acme/model-manager/qwen-secret.enc.yaml"
 	dirKustomization    = "clusters/org-acme/model-manager/kustomization.yaml"
 	parentPath          = "clusters/org-acme/kustomization.yaml"
 )
@@ -56,8 +56,8 @@ func actions(p *Plan) map[string]Action {
 
 func write() map[string][]byte {
 	return map[string][]byte{
-		plainFile:  []byte("kind: ModelConfig\nmetadata:\n  name: qwen\n"),
-		encFile: []byte("kind: Secret\nmetadata:\n  name: qwen\nstringData:\n  OPENAI_API_KEY: placeholder\n"),
+		plainFile: []byte("kind: ModelConfig\nmetadata:\n  name: qwen\n"),
+		encFile:   []byte("kind: Secret\nmetadata:\n  name: qwen\nstringData:\n  OPENAI_API_KEY: placeholder\n"),
 	}
 }
 
