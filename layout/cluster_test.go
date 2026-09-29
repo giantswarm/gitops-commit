@@ -20,6 +20,12 @@ const (
 	clusterSecret = clusterDir + "/wc1-secret.enc.yaml"
 	clusterOwn    = clusterDir + "/kustomization.yaml"
 	clusterPool   = clusterDir + "/cluster-manager/pool.yaml"
+	fleetName     = "fleet"
+	ownerName     = "flux"
+	mc1           = "mc1"
+	wc1           = "wc1"
+	fluxNamespace = "default"
+	sopsKeysName  = "sops-gpg-master"
 	otherKust     = "# the org's clusters\napiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - other.yaml # kept\n"
 )
 
@@ -28,21 +34,21 @@ const (
 func fleet(prune bool) provenance.Flux {
 	return provenance.Flux{
 		Kustomizations: []provenance.Kustomization{{
-			Name: "flux", Namespace: "default", Path: "./management-clusters/mc1",
-			SourceRef:          provenance.SourceRef{Kind: provenance.KindGitRepository, Name: "fleet"},
+			Name: ownerName, Namespace: fluxNamespace, Path: "./management-clusters/mc1",
+			SourceRef:          provenance.SourceRef{Kind: provenance.KindGitRepository, Name: fleetName},
 			ServiceAccountName: "automation", Interval: "1m", Timeout: "2m", Prune: prune,
-			Keys: &provenance.Keys{Provider: "sops", SecretRef: "sops-gpg-master"},
+			Keys: &provenance.Keys{Provider: "sops", SecretRef: sopsKeysName},
 		}, {
-			Name: "from-oci", Namespace: "default", Path: "./",
+			Name: "from-oci", Namespace: fluxNamespace, Path: "./",
 			SourceRef: provenance.SourceRef{Kind: "OCIRepository", Name: "artifacts"},
 		}},
-		GitRepositories: []provenance.GitRepository{{Name: "fleet", Namespace: "default", URL: "https://github.com/acme/fleet", Branch: "main"}},
+		GitRepositories: []provenance.GitRepository{{Name: fleetName, Namespace: fluxNamespace, URL: "https://github.com/acme/fleet", Branch: "main"}},
 	}
 }
 
 func cluster(t *testing.T, prune bool) Cluster {
 	t.Helper()
-	c, err := NewCluster(fleet(prune), "default", "flux", "mc1", "acme", "wc1")
+	c, err := NewCluster(fleet(prune), fluxNamespace, ownerName, mc1, acme, wc1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,16 +194,16 @@ func TestClusterRefusals(t *testing.T) {
 		inst, org, clusterID string
 		want                 error
 	}{
-		{"organization without a Kustomization", fleet(true), "", "mc1", "acme", "wc1", ErrNotReconciled},
-		{"Kustomization not from a GitRepository", fleet(true), "from-oci", "mc1", "acme", "wc1", provenance.ErrNotGit},
-		{"GitRepository on no branch", noBranch, "flux", "mc1", "acme", "wc1", provenance.ErrNoBranch},
-		{"Kustomization not among the Flux objects", fleet(true), "missing", "mc1", "acme", "wc1", provenance.ErrNotFound},
-		{"cluster name with a slash", fleet(true), "flux", "mc1", "acme", "wc1/x", nil},
-		{"empty organization", fleet(true), "flux", "mc1", "", "wc1", nil},
-		{"installation ..", fleet(true), "flux", "..", "acme", "wc1", nil},
+		{"organization without a Kustomization", fleet(true), "", mc1, acme, wc1, ErrNotReconciled},
+		{"Kustomization not from a GitRepository", fleet(true), "from-oci", mc1, acme, wc1, provenance.ErrNotGit},
+		{"GitRepository on no branch", noBranch, ownerName, mc1, acme, wc1, provenance.ErrNoBranch},
+		{"Kustomization not among the Flux objects", fleet(true), "missing", mc1, acme, wc1, provenance.ErrNotFound},
+		{"cluster name with a slash", fleet(true), ownerName, mc1, acme, "wc1/x", nil},
+		{"empty organization", fleet(true), ownerName, mc1, "", wc1, nil},
+		{"installation ..", fleet(true), ownerName, "..", acme, wc1, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := NewCluster(tc.flux, "default", tc.owner, tc.inst, tc.org, tc.clusterID)
+			_, err := NewCluster(tc.flux, fluxNamespace, tc.owner, tc.inst, tc.org, tc.clusterID)
 			if err == nil || tc.want != nil && !errors.Is(err, tc.want) {
 				t.Fatalf("NewCluster error = %v, want %v", err, tc.want)
 			}

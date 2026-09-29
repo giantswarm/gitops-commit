@@ -14,7 +14,10 @@ import (
 	"github.com/giantswarm/gitops-commit/provenance"
 )
 
-var repo = provenance.Repository{Owner: "acme", Name: "fleet"}
+// acme owns the fixture repository and is the fixture organization.
+const acme = "acme"
+
+var repo = provenance.Repository{Owner: acme, Name: fleetName}
 
 const (
 	parentKustomization = "# the org's clusters\napiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - cluster.yaml # the cluster\n"
