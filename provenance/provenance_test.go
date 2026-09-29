@@ -163,7 +163,7 @@ func TestParseRepositoryURL(t *testing.T) {
 
 func TestAddDecodedObjects(t *testing.T) {
 	objects := []string{
-		`{"apiVersion":"kustomize.toolkit.fluxcd.io/v1","kind":"Kustomization","metadata":{"name":"flux","namespace":"flux-system"},"spec":{"path":"./management-clusters/mc1","sourceRef":{"kind":"GitRepository","name":"management-clusters"}}}`,
+		`{"apiVersion":"kustomize.toolkit.fluxcd.io/v1","kind":"Kustomization","metadata":{"name":"flux","namespace":"flux-system"},"spec":{"path":"./management-clusters/mc1","sourceRef":{"kind":"GitRepository","name":"management-clusters"},"serviceAccountName":"automation","interval":"1m","timeout":"2m","prune":true,"decryption":{"provider":"sops","secretRef":{"name":"sops-keys"}}}}`,
 		`{"apiVersion":"source.toolkit.fluxcd.io/v1","kind":"GitRepository","metadata":{"name":"management-clusters","namespace":"flux-system"},"spec":{"url":"https://github.com/example-org/example-management-clusters","ref":{"branch":"main"}}}`,
 	}
 	var flux Flux
@@ -182,6 +182,14 @@ func TestAddDecodedObjects(t *testing.T) {
 	}
 	if loc.Repository.String() != testCMCRepo || loc.Directory != mc1Dir || loc.Branch != mainBranch {
 		t.Fatalf("Resolve = %+v", loc)
+	}
+	ks, ok := flux.FindKustomization(testNamespace, "flux")
+	if !ok || ks.ServiceAccountName != "automation" || ks.Interval != "1m" || ks.Timeout != "2m" || !ks.Prune ||
+		ks.Keys == nil || *ks.Keys != (Keys{Provider: "sops", SecretRef: "sops-keys"}) {
+		t.Fatalf("FindKustomization = %+v, %v", ks, ok)
+	}
+	if _, ok := flux.FindKustomization(testNamespace, "missing"); ok {
+		t.Fatal("FindKustomization(missing): want false")
 	}
 
 	var other map[string]any

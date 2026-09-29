@@ -93,6 +93,24 @@ type Kustomization struct {
 	SourceRef SourceRef
 	// Path is spec.path as Flux carries it ("./management-clusters/x").
 	Path string
+	// ServiceAccountName, Interval and Timeout are spec.serviceAccountName,
+	// spec.interval and spec.timeout as Flux carries them ("1m"); empty when
+	// unset.
+	ServiceAccountName string
+	Interval           string
+	Timeout            string
+	// Prune is spec.prune: whether Flux removes what leaves the directory.
+	Prune bool
+	// Keys is spec.decryption, nil when the Kustomization applies no
+	// encrypted files.
+	Keys *Keys
+}
+
+// Keys is a Kustomization's spec.decryption: the provider ("sops") and the
+// Secret next to the Kustomization that holds the keys.
+type Keys struct {
+	Provider  string
+	SecretRef string
 }
 
 // GitRepository is the part of a Flux GitRepository the resolution reads.
@@ -141,6 +159,12 @@ func (f Flux) Resolve(namespace, name string) (Location, error) {
 		return Location{}, fmt.Errorf("kustomization %s/%s: %w", namespace, name, err)
 	}
 	return Location{Repository: repository, Branch: repo.Branch, Directory: directory}, nil
+}
+
+// FindKustomization returns the Kustomization namespace/name, and whether
+// the Flux objects hold it.
+func (f Flux) FindKustomization(namespace, name string) (Kustomization, bool) {
+	return f.kustomization(namespace, name)
 }
 
 func (f Flux) kustomization(namespace, name string) (Kustomization, bool) {

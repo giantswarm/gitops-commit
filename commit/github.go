@@ -477,6 +477,27 @@ func (g *GitHub) ReadFile(ctx context.Context, repo Repository, branch, path str
 	return raw, nil
 }
 
+// ListFiles returns the files under dir at the head of branch, from the
+// branch's recursive Git tree. A tree GitHub truncates is an error, never a
+// partial answer.
+func (g *GitHub) ListFiles(ctx context.Context, repo Repository, branch, dir string) ([]string, error) {
+	tree, _, err := g.gh.Git.GetTree(ctx, repo.Owner, repo.Name, branch, true)
+	if err != nil {
+		return nil, wrap(OpListFiles, err)
+	}
+	if tree.GetTruncated() {
+		return nil, fmt.Errorf("%s %s/%s@%s: the repository's tree is too large for one read", OpListFiles, repo, dir, branch)
+	}
+	var out []string
+	for _, e := range tree.Entries {
+		if e.GetType() == blobType && strings.HasPrefix(e.GetPath(), dir+"/") {
+			out = append(out, e.GetPath())
+		}
+	}
+	slices.Sort(out)
+	return out, nil
+}
+
 // deletedEntry removes path from the tree: an entry without sha and content.
 func deletedEntry(path string) *github.TreeEntry {
 	return &github.TreeEntry{Path: new(path), Mode: new(blobMode), Type: new(blobType)}

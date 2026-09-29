@@ -303,3 +303,40 @@ func TestGitHubReadFileReadsTheBlobAndAnswersNotFound(t *testing.T) {
 		t.Errorf("refused: want ErrAuth, got %v", err)
 	}
 }
+
+func TestGitHubListFilesListsTheDirectoryFromTheRecursiveTree(t *testing.T) {
+	mux, gh := server(t)
+	mux.HandleFunc("/api/v3/repos/acme/management-clusters/git/trees/main", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("recursive") == "" {
+			t.Errorf("tree read without recursive")
+		}
+		writeJSON(t, w, map[string]any{shaKey: "tree1", "tree": []map[string]any{
+			{"path": "a", "type": "tree"},
+			{"path": "a/x.yaml", "type": blobType},
+			{"path": "a/b", "type": "tree"},
+			{"path": "a/b/y.yaml", "type": blobType},
+			{"path": "ab/z.yaml", "type": blobType},
+		}})
+	})
+	ctx := context.Background()
+	got, err := gh.ListFiles(ctx, repoA, mainBranch, "a")
+	if err != nil || strings.Join(got, ",") != "a/b/y.yaml,a/x.yaml" {
+		t.Fatalf("ListFiles = %q, %v", got, err)
+	}
+	if got, err := gh.ListFiles(ctx, repoA, mainBranch, "missing"); err != nil || len(got) != 0 {
+		t.Errorf("missing directory = %q, %v", got, err)
+	}
+	if _, err := refusing(t, http.StatusForbidden).ListFiles(ctx, repoA, mainBranch, "a"); !errors.Is(err, ErrAuth) {
+		t.Errorf("refused: want ErrAuth, got %v", err)
+	}
+}
+
+func TestGitHubListFilesRefusesATruncatedTree(t *testing.T) {
+	mux, gh := server(t)
+	mux.HandleFunc("/api/v3/repos/acme/management-clusters/git/trees/main", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, map[string]any{shaKey: "tree1", "truncated": true, "tree": []map[string]any{{"path": "a/x.yaml", "type": blobType}}})
+	})
+	if _, err := gh.ListFiles(context.Background(), repoA, mainBranch, "a"); err == nil {
+		t.Fatal("truncated tree: want error")
+	}
+}
