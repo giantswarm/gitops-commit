@@ -232,7 +232,7 @@ func TestGitHubCommitRemovesAPathWhoseContentIsNil(t *testing.T) {
 		writeJSON(t, w, map[string]any{refKey: "refs/heads/remove-pool", "object": map[string]any{shaKey: headSHA}})
 	})
 	mux.HandleFunc("/api/v3/repos/acme/management-clusters/git/commits/"+headSHA, func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(t, w, map[string]any{shaKey: headSHA, "tree": map[string]any{shaKey: "tree0"}})
+		writeJSON(t, w, map[string]any{shaKey: headSHA, treeKey: map[string]any{shaKey: "tree0"}})
 	})
 	blobs := 0
 	mux.HandleFunc("/api/v3/repos/acme/management-clusters/git/blobs", func(w http.ResponseWriter, _ *http.Request) {
@@ -247,7 +247,7 @@ func TestGitHubCommitRemovesAPathWhoseContentIsNil(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&tree); err != nil {
 			t.Error(err)
 		}
-		writeJSON(t, w, map[string]any{shaKey: "tree1"})
+		writeJSON(t, w, map[string]any{shaKey: treeSHA})
 	})
 	mux.HandleFunc("/api/v3/repos/acme/management-clusters/git/commits", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(t, w, map[string]any{shaKey: "commit1"})
@@ -283,7 +283,7 @@ func TestGitHubReadFileReadsTheBlobAndAnswersNotFound(t *testing.T) {
 		if r.URL.Query().Get(refKey) != mainBranch {
 			t.Errorf("ref = %q", r.URL.Query().Get(refKey))
 		}
-		writeJSON(t, w, map[string]any{"type": "file", shaKey: "blob9", "path": kustomizationPath})
+		writeJSON(t, w, map[string]any{typeKey: "file", shaKey: "blob9", pathKey: kustomizationPath})
 	})
 	mux.HandleFunc("/api/v3/repos/acme/management-clusters/git/blobs/blob9", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("resources: [pool.yaml]"))
@@ -303,3 +303,52 @@ func TestGitHubReadFileReadsTheBlobAndAnswersNotFound(t *testing.T) {
 		t.Errorf("refused: want ErrAuth, got %v", err)
 	}
 }
+
+func TestGitHubListFilesListsTheDirectoryFromTheRecursiveTree(t *testing.T) {
+	mux, gh := server(t)
+	mux.HandleFunc("/api/v3/repos/acme/management-clusters/git/trees/main", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("recursive") == "" {
+			t.Errorf("tree read without recursive")
+		}
+		writeJSON(t, w, map[string]any{shaKey: treeSHA, treeKey: []map[string]any{
+			{pathKey: "a", typeKey: "tree"},
+			{pathKey: "a/x.yaml", typeKey: blobType},
+			{pathKey: "a/b", typeKey: "tree"},
+			{pathKey: "a/b/y.yaml", typeKey: blobType},
+			{pathKey: "ab/z.yaml", typeKey: blobType},
+		}})
+	})
+	ctx := context.Background()
+	got, err := gh.ListFiles(ctx, repoA, mainBranch, "a")
+	if err != nil || strings.Join(got, ",") != "a/b/y.yaml,a/x.yaml" {
+		t.Fatalf("ListFiles = %q, %v", got, err)
+	}
+	if got, err := gh.ListFiles(ctx, repoA, mainBranch, "missing"); err != nil || len(got) != 0 {
+		t.Errorf("missing directory = %q, %v", got, err)
+	}
+	if _, err := refusing(t, http.StatusForbidden).ListFiles(ctx, repoA, mainBranch, "a"); !errors.Is(err, ErrAuth) {
+		t.Errorf("refused: want ErrAuth, got %v", err)
+	}
+}
+
+func TestGitHubListFilesRefusesATruncatedTree(t *testing.T) {
+	mux, gh := server(t)
+	mux.HandleFunc("/api/v3/repos/acme/management-clusters/git/trees/main", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, map[string]any{shaKey: treeSHA, "truncated": true, treeKey: []map[string]any{{pathKey: "a/x.yaml", typeKey: blobType}}})
+	})
+	if _, err := gh.ListFiles(context.Background(), repoA, mainBranch, "a"); err == nil {
+		t.Fatal("truncated tree: want error")
+	}
+}
+
+// treeSHA is the SHA of the tree the ListFiles fakes answer with.
+const treeSHA = "tree1"
+
+// pathKey is a tree entry's or content's path in the GitHub API.
+const pathKey = "path"
+
+// treeKey and typeKey are a Git tree's entries and an entry's type in the GitHub API.
+const (
+	treeKey = "tree"
+	typeKey = "type"
+)

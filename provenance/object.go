@@ -39,7 +39,12 @@ func (f *Flux) Add(obj map[string]any) error {
 				Name:      stringAt(obj, "spec", "sourceRef", "name"),
 				Namespace: stringAt(obj, "spec", "sourceRef", "namespace"),
 			},
-			Path: stringAt(obj, "spec", "path"),
+			Path:               stringAt(obj, "spec", "path"),
+			ServiceAccountName: stringAt(obj, "spec", "serviceAccountName"),
+			Interval:           stringAt(obj, "spec", "interval"),
+			Timeout:            stringAt(obj, "spec", "timeout"),
+			Prune:              boolAt(obj, "spec", "prune"),
+			Keys:               keysAt(obj),
 		})
 	case group == sourceGroup && kind == KindGitRepository:
 		f.GitRepositories = append(f.GitRepositories, GitRepository{
@@ -54,19 +59,36 @@ func (f *Flux) Add(obj map[string]any) error {
 	return nil
 }
 
+// keysAt returns the object's spec.decryption, nil when it has none.
+func keysAt(obj map[string]any) *Keys {
+	provider := stringAt(obj, "spec", "decryption", "provider")
+	if provider == "" {
+		return nil
+	}
+	return &Keys{Provider: provider, SecretRef: stringAt(obj, "spec", "decryption", "secretRef", "name")}
+}
+
+// boolAt returns the bool at the nested keys, false when absent or not a bool.
+func boolAt(obj map[string]any, keys ...string) bool {
+	v, _ := valueAt(obj, keys...).(bool)
+	return v
+}
+
 // stringAt returns the string at the nested keys, "" when absent or not a string.
 func stringAt(obj map[string]any, keys ...string) string {
+	s, _ := valueAt(obj, keys...).(string)
+	return s
+}
+
+// valueAt returns the value at the nested keys, nil when absent.
+func valueAt(obj map[string]any, keys ...string) any {
 	var current any = obj
 	for _, key := range keys {
 		m, ok := current.(map[string]any)
 		if !ok {
-			return ""
+			return nil
 		}
-		current, ok = m[key]
-		if !ok {
-			return ""
-		}
+		current = m[key]
 	}
-	s, _ := current.(string)
-	return s
+	return current
 }

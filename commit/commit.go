@@ -123,6 +123,16 @@ type Reader interface {
 	ReadFile(ctx context.Context, repo Repository, branch, path string) ([]byte, error)
 }
 
+// Lister lists a directory of a repository at a branch: what a caller
+// removes as a whole (a workload cluster's directory) or checks is there
+// before it writes into it. GitHub and Fake implement it.
+type Lister interface {
+	// ListFiles returns the repository-relative paths of every file under
+	// dir at the head of branch, recursively and sorted; none when the
+	// branch carries no such directory.
+	ListFiles(ctx context.Context, repo Repository, branch, dir string) ([]string, error)
+}
+
 // Operation names of the remote calls, carried by AuthError and by Fake.Fail.
 const (
 	OpCreateBranch    = "create branch"
@@ -136,6 +146,7 @@ const (
 	OpClose           = "close pull request"
 	OpRevert          = "revert pull request"
 	OpReadFile        = "read file"
+	OpListFiles       = "list files"
 )
 
 var (

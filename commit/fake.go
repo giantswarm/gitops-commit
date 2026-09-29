@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"sync"
 )
 
@@ -181,6 +182,27 @@ func (f *Fake) ReadFile(_ context.Context, repo Repository, branch, path string)
 		return nil, fmt.Errorf("%s %s/%s@%s: %w", OpReadFile, repo, path, branch, ErrFileNotFound)
 	}
 	return slices.Clone(content), nil
+}
+
+// ListFiles implements Lister.
+func (f *Fake) ListFiles(_ context.Context, repo Repository, branch, dir string) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.Fail[OpListFiles]; err != nil {
+		return nil, err
+	}
+	sha, ok := f.heads[key(repo, branch)]
+	if !ok {
+		return nil, fmt.Errorf("%s: %s has no branch %q", OpListFiles, repo, branch)
+	}
+	var out []string
+	for p := range f.commits[sha].Files {
+		if strings.HasPrefix(p, dir+"/") {
+			out = append(out, p)
+		}
+	}
+	slices.Sort(out)
+	return out, nil
 }
 
 // OpenPullRequest implements Remote.

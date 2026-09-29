@@ -70,7 +70,7 @@ func (d Directory) ObjectFile(kind, name string) string {
 }
 
 func (d Directory) validate() error {
-	if d.Name == "" || strings.Contains(d.Name, "/") || d.Name == "." || d.Name == ".." {
+	if !segment(d.Name) {
 		return fmt.Errorf("layout: directory name %q is not one path segment", d.Name)
 	}
 	return nil
@@ -133,6 +133,22 @@ func (e *SecretError) Error() string {
 // YAML nodes: comments and every other key stay. Read errors from r are
 // returned as they are (commit.AuthError included).
 func Build(ctx context.Context, r commit.Reader, dir Directory, write map[string][]byte, remove []string) (*Plan, error) {
+	b, err := newBuilder(ctx, r, dir, write, remove)
+	if err != nil {
+		return nil, err
+	}
+	emptied, err := b.directory(write, remove)
+	if err != nil {
+		return nil, err
+	}
+	if err := b.parent(emptied); err != nil {
+		return nil, err
+	}
+	return b.done(), nil
+}
+
+// newBuilder checks dir and that every path is an object file inside it.
+func newBuilder(ctx context.Context, r commit.Reader, dir Directory, write map[string][]byte, remove []string) (*builder, error) {
 	if err := dir.validate(); err != nil {
 		return nil, err
 	}
@@ -141,19 +157,7 @@ func Build(ctx context.Context, r commit.Reader, dir Directory, write map[string
 			return nil, fmt.Errorf("layout: %s is not an object file of %s", p, dir.Path())
 		}
 	}
-	b := &builder{ctx: ctx, r: r, dir: dir, base: map[string][]byte{}, plan: &Plan{Directory: dir, changes: map[string][]byte{}}}
-	if err := b.objects(write, remove); err != nil {
-		return nil, err
-	}
-	emptied, err := b.kustomization()
-	if err != nil {
-		return nil, err
-	}
-	if err := b.parent(emptied); err != nil {
-		return nil, err
-	}
-	slices.SortFunc(b.plan.Files, func(x, y File) int { return strings.Compare(x.Path, y.Path) })
-	return b.plan, nil
+	return &builder{ctx: ctx, r: r, dir: dir, base: map[string][]byte{}, plan: &Plan{Directory: dir, changes: map[string][]byte{}}}, nil
 }
 
 type builder struct {
@@ -162,6 +166,21 @@ type builder struct {
 	dir  Directory
 	base map[string][]byte
 	plan *Plan
+}
+
+// directory decides the object files and the directory's own
+// kustomization.yaml; emptied reports that it holds nothing after the write.
+func (b *builder) directory(write map[string][]byte, remove []string) (emptied bool, err error) {
+	if err := b.objects(write, remove); err != nil {
+		return false, err
+	}
+	return b.kustomization()
+}
+
+// done is the plan with its files sorted by path.
+func (b *builder) done() *Plan {
+	slices.SortFunc(b.plan.Files, func(x, y File) int { return strings.Compare(x.Path, y.Path) })
+	return b.plan
 }
 
 // read is a file at the base branch, nil when the branch does not carry it.

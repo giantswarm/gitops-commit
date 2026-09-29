@@ -14,7 +14,10 @@ import (
 	"github.com/giantswarm/gitops-commit/provenance"
 )
 
-var repo = provenance.Repository{Owner: "acme", Name: "fleet"}
+// acme owns the fixture repository and is the fixture organization.
+const acme = "acme"
+
+var repo = provenance.Repository{Owner: acme, Name: fleetName}
 
 const (
 	parentKustomization = "# the org's clusters\napiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - cluster.yaml # the cluster\n"
@@ -31,12 +34,17 @@ func dir() Directory {
 // sopsYAML encrypts every secret file under clusters/ for a fresh age key;
 // no private key is checked in.
 func sopsYAML(t *testing.T) []byte {
+	return sopsYAMLFor(t, "clusters/.*(secret|credential|secrets/).*")
+}
+
+// sopsYAMLFor encrypts the secret files matching pathRegex for a fresh age key.
+func sopsYAMLFor(t *testing.T, pathRegex string) []byte {
 	t.Helper()
 	id, err := age.GenerateX25519Identity()
 	if err != nil {
 		t.Fatal(err)
 	}
-	return []byte("creation_rules:\n  - age: " + id.Recipient().String() + "\n    path_regex: clusters/.*(secret|credential|secrets/).*\n    encrypted_regex: ^(data|stringData)$\n")
+	return []byte("creation_rules:\n  - age: " + id.Recipient().String() + "\n    path_regex: " + pathRegex + "\n    encrypted_regex: ^(data|stringData)$\n")
 }
 
 func seed(t *testing.T, files map[string][]byte) *commit.Fake {
