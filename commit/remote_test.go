@@ -8,9 +8,12 @@ import (
 )
 
 const (
-	readme     = "README.md"
-	oneFile    = "a.yaml"
-	sopsConfig = ".sops.yaml"
+	readme        = "README.md"
+	oneFile       = "a.yaml"
+	oldFile       = "old.yaml"
+	bothFile      = "both.yaml"
+	sopsConfig    = ".sops.yaml"
+	featureBranch = "feature"
 )
 
 // opened seeds a branch with one commit off main and opens its pull request.
@@ -33,21 +36,21 @@ func opened(t *testing.T, f *Fake, branch string, files map[string][]byte) PullR
 func TestFindPullRequestSeesOnlyTheOpenOne(t *testing.T) {
 	f, _, _ := fixture(t)
 	ctx := context.Background()
-	if _, found, err := f.FindPullRequest(ctx, repoA, "feature"); err != nil || found {
+	if _, found, err := f.FindPullRequest(ctx, repoA, featureBranch); err != nil || found {
 		t.Fatalf("before opening: found=%v err=%v", found, err)
 	}
-	pr := opened(t, f, "feature", map[string][]byte{oneFile: []byte("a")})
-	got, found, err := f.FindPullRequest(ctx, repoA, "feature")
+	pr := opened(t, f, featureBranch, map[string][]byte{oneFile: []byte("a")})
+	got, found, err := f.FindPullRequest(ctx, repoA, featureBranch)
 	if err != nil || !found || got.Number != pr.Number || got.HeadSHA != pr.HeadSHA {
 		t.Fatalf("open: found=%v got=%+v err=%v", found, got, err)
 	}
 	if err := f.Close(ctx, pr, false); err != nil {
 		t.Fatal(err)
 	}
-	if _, found, _ := f.FindPullRequest(ctx, repoA, "feature"); found {
+	if _, found, _ := f.FindPullRequest(ctx, repoA, featureBranch); found {
 		t.Error("a closed pull request is found")
 	}
-	if _, err := f.OpenPullRequest(ctx, repoA, "feature", mainBranch, "Again", actionID); err != nil {
+	if _, err := f.OpenPullRequest(ctx, repoA, featureBranch, mainBranch, "Again", actionID); err != nil {
 		t.Fatal(err)
 	}
 	if prs := f.PullRequests(); len(prs) != 2 || !prs[0].Closed || prs[1].Closed {
@@ -132,9 +135,9 @@ func TestRevertInvertsTheMergedChangeOnTheTip(t *testing.T) {
 	f.AddBranch(repoA, mainBranch, map[string][]byte{
 		readme:     []byte("hello"),
 		sopsConfig: []byte("rules: [a]"),
-		"old.yaml": []byte("old"),
+		oldFile:    []byte("old"),
 	})
-	pr := opened(t, f, "feature", map[string][]byte{
+	pr := opened(t, f, featureBranch, map[string][]byte{
 		"new/values.yaml": []byte("new"),
 		readme:            []byte("changed"),
 		sopsConfig:        []byte("rules: [a, b]"),
@@ -157,7 +160,7 @@ func TestRevertInvertsTheMergedChangeOnTheTip(t *testing.T) {
 		t.Errorf("revert branch/base: %+v", revert)
 	}
 	files := f.Files(repoA, revert.Head)
-	want := map[string]string{readme: "hello", sopsConfig: "rules: [a, c]", "old.yaml": "old", "later.yaml": "later"}
+	want := map[string]string{readme: "hello", sopsConfig: "rules: [a, c]", oldFile: "old", "later.yaml": "later"}
 	if len(files) != len(want) {
 		t.Errorf("revert tree has %d files, want %d: %q", len(files), len(want), files)
 	}
@@ -268,6 +271,67 @@ func TestCommitRemovesAPathWhoseContentIsNil(t *testing.T) {
 	}
 	if got := string(files[kustomizationPath]); got != "resources: []" {
 		t.Errorf("kustomization.yaml = %q", got)
+	}
+}
+
+// TestFakeCreateBranchMergesTheBaseIntoAnExistingBranch: a branch behind its
+// base takes the base's changes since they parted — a file added, one
+// changed, one removed — keeps its own, and a change both sides made the
+// same way is no conflict. A branch that contains the base is left as it is,
+// and a conflict on a branch without a pull request names none.
+func TestFakeCreateBranchMergesTheBaseIntoAnExistingBranch(t *testing.T) {
+	f := NewFake()
+	f.AddBranch(repoA, mainBranch, map[string][]byte{readme: []byte("hello"), oldFile: []byte("old"), bothFile: []byte("v1"), poolPath: []byte("pool")})
+	ctx := context.Background()
+	if err := f.CreateBranch(ctx, repoA, featureBranch, mainBranch); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Commit(ctx, repoA, featureBranch, "ours", map[string][]byte{oneFile: []byte("ours"), bothFile: []byte("v2")}); err != nil {
+		t.Fatal(err)
+	}
+	ours := f.Commits(repoA, featureBranch)
+	if err := f.CreateBranch(ctx, repoA, featureBranch, mainBranch); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.Commits(repoA, featureBranch); len(got) != 1 {
+		t.Fatalf("a branch ahead of its base took a merge: %+v", got)
+	}
+	if err := f.Commit(ctx, repoA, mainBranch, "theirs", map[string][]byte{"new.yaml": []byte("new"), readme: []byte("changed"), oldFile: nil, bothFile: []byte("v2")}); err != nil {
+		t.Fatal(err)
+	}
+	mainCommits := f.Commits(repoA, mainBranch)
+	if err := f.CreateBranch(ctx, repoA, featureBranch, mainBranch); err != nil {
+		t.Fatal(err)
+	}
+	files := f.Files(repoA, featureBranch)
+	want := map[string]string{readme: "changed", "new.yaml": "new", bothFile: "v2", oneFile: "ours", poolPath: "pool"}
+	if len(files) != len(want) {
+		t.Errorf("merged tree has %d files, want %d: %q", len(files), len(want), files)
+	}
+	for path, content := range want {
+		if string(files[path]) != content {
+			t.Errorf("%s = %q, want %q", path, files[path], content)
+		}
+	}
+	commits := f.Commits(repoA, featureBranch)
+	if len(commits) != 2 || commits[1].Parent != ours[0].SHA || commits[1].MergeParent != mainCommits[0].SHA || commits[1].Message != "Merge branch 'main' into feature" {
+		t.Errorf("commits after the update: %+v, want ours and the merge of main", commits)
+	}
+	if err := f.CreateBranch(ctx, repoA, featureBranch, mainBranch); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.Commits(repoA, featureBranch); len(got) != 2 {
+		t.Errorf("an up-to-date branch took another merge: %+v", got)
+	}
+	if err := f.Commit(ctx, repoA, mainBranch, "conflict", map[string][]byte{oneFile: []byte("theirs")}); err != nil {
+		t.Fatal(err)
+	}
+	err := f.CreateBranch(ctx, repoA, featureBranch, mainBranch)
+	if !errors.Is(err, ErrStaleBranch) || !strings.Contains(err.Error(), featureBranch) || !strings.Contains(err.Error(), "no open pull request") {
+		t.Errorf("conflict without a pull request: %v", err)
+	}
+	if got := f.Commits(repoA, featureBranch); len(got) != 2 {
+		t.Errorf("a refused update moved the branch: %+v", got)
 	}
 }
 

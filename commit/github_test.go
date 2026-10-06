@@ -94,9 +94,9 @@ func writeJSON(t *testing.T, w http.ResponseWriter, v any) {
 func TestGitHubRefusedTokenOnEveryPullRequestSeam(t *testing.T) {
 	gh := refusing(t, http.StatusForbidden)
 	ctx := context.Background()
-	pr := PullRequest{Repository: repoA, Number: 7, Head: "feature", HeadSHA: "abc"}
-	_, _, findErr := gh.FindPullRequest(ctx, repoA, "feature")
-	_, draftErr := gh.OpenDraftPullRequest(ctx, repoA, "feature", mainBranch, "t", "b")
+	pr := PullRequest{Repository: repoA, Number: 7, Head: featureBranch, HeadSHA: "abc"}
+	_, _, findErr := gh.FindPullRequest(ctx, repoA, featureBranch)
+	_, draftErr := gh.OpenDraftPullRequest(ctx, repoA, featureBranch, mainBranch, "t", "b")
 	_, revertErr := gh.Revert(ctx, pr, "b", nil)
 	for op, err := range map[string]error{
 		OpFindPullRequest: findErr,
@@ -115,7 +115,7 @@ func TestGitHubRefusedTokenOnEveryPullRequestSeam(t *testing.T) {
 func TestGitHubEnableAutoMergeSendsTheMutationWithTheRepositorysMethod(t *testing.T) {
 	mux, gh := server(t)
 	mux.HandleFunc("/api/v3/repos/acme/management-clusters/pulls/7", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(t, w, map[string]any{"number": 7, "node_id": "PR_node"})
+		writeJSON(t, w, map[string]any{numberKey: 7, "node_id": "PR_node"})
 	})
 	mux.HandleFunc("/api/v3/repos/acme/management-clusters", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(t, w, map[string]any{"allow_squash_merge": false, "allow_merge_commit": false, "allow_rebase_merge": true})
@@ -141,7 +141,7 @@ func TestGitHubEnableAutoMergeSendsTheMutationWithTheRepositorysMethod(t *testin
 	if !strings.Contains(got.Query, "enablePullRequestAutoMerge") || got.Variables["id"] != "PR_node" || got.Variables["method"] != "REBASE" {
 		t.Errorf("mutation sent: %+v", got)
 	}
-	graphqlErrors = []map[string]any{{"message": "Pull request is not in the correct state"}}
+	graphqlErrors = []map[string]any{{messageKey: "Pull request is not in the correct state"}}
 	if err := gh.EnableAutoMerge(context.Background(), pr); err == nil || !strings.Contains(err.Error(), "correct state") {
 		t.Errorf("GraphQL errors are not surfaced: %v", err)
 	}
@@ -154,7 +154,7 @@ func TestGitHubCloseLeavesAClosedPullRequestAlone(t *testing.T) {
 		if r.Method == http.MethodPatch {
 			edits++
 		}
-		writeJSON(t, w, map[string]any{"number": 7, "state": "closed", "head": map[string]any{"ref": "feature"}})
+		writeJSON(t, w, map[string]any{numberKey: 7, "state": "closed", "head": map[string]any{"ref": featureBranch}})
 	})
 	if err := gh.Close(context.Background(), PullRequest{Repository: repoA, Number: 7}, true); err != nil || edits != 0 {
 		t.Errorf("closing a closed pull request: err=%v edits=%d", err, edits)
@@ -178,7 +178,7 @@ func TestNewGitHubWithClientAddsNoCredentialOfItsOwn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, found, err := gh.FindPullRequest(context.Background(), repoA, "feature"); err != nil || found {
+	if _, found, err := gh.FindPullRequest(context.Background(), repoA, featureBranch); err != nil || found {
 		t.Fatalf("find: found=%v err=%v", found, err)
 	}
 	if authorization != "Bearer minted-by-the-callers-transport" {
@@ -217,7 +217,7 @@ func TestGitHubApproveRefusedIsAnAuthError(t *testing.T) {
 	mux, gh := server(t)
 	mux.HandleFunc("/api/v3/repos/acme/management-clusters/pulls/7/reviews", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
-		writeJSON(t, w, map[string]any{"message": "Resource not accessible by integration"})
+		writeJSON(t, w, map[string]any{messageKey: "Resource not accessible by integration"})
 	})
 	err := gh.Approve(context.Background(), PullRequest{Repository: repoA, Number: 7}, "x")
 	var auth *AuthError
@@ -229,7 +229,7 @@ func TestGitHubApproveRefusedIsAnAuthError(t *testing.T) {
 func TestGitHubCommitRemovesAPathWhoseContentIsNil(t *testing.T) {
 	mux, gh := server(t)
 	mux.HandleFunc("/api/v3/repos/acme/management-clusters/git/ref/heads/remove-pool", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(t, w, map[string]any{refKey: "refs/heads/remove-pool", "object": map[string]any{shaKey: headSHA}})
+		writeJSON(t, w, map[string]any{refKey: "refs/heads/remove-pool", objectKey: map[string]any{shaKey: headSHA}})
 	})
 	mux.HandleFunc("/api/v3/repos/acme/management-clusters/git/commits/"+headSHA, func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(t, w, map[string]any{shaKey: headSHA, treeKey: map[string]any{shaKey: "tree0"}})
@@ -253,7 +253,7 @@ func TestGitHubCommitRemovesAPathWhoseContentIsNil(t *testing.T) {
 		writeJSON(t, w, map[string]any{shaKey: "commit1"})
 	})
 	mux.HandleFunc("/api/v3/repos/acme/management-clusters/git/refs/heads/remove-pool", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(t, w, map[string]any{refKey: "refs/heads/remove-pool", "object": map[string]any{shaKey: "commit1"}})
+		writeJSON(t, w, map[string]any{refKey: "refs/heads/remove-pool", objectKey: map[string]any{shaKey: "commit1"}})
 	})
 	err := gh.Commit(context.Background(), repoA, "remove-pool", "remove the pool", map[string][]byte{
 		kustomizationPath: []byte("resources: []"),
@@ -274,6 +274,68 @@ func TestGitHubCommitRemovesAPathWhoseContentIsNil(t *testing.T) {
 	}
 	if _, ok := removed[shaKey]; !ok {
 		t.Errorf("removed entry %v omits sha: GitHub keeps the file unless sha is null", removed)
+	}
+}
+
+// TestGitHubCreateBranchBringsAnExistingBranchUpToDate: a new branch is one
+// ref create and no merge; an existing one (422 on the create) is merged
+// with its base through the branch merge — 201 the merge commit, 204 a head
+// that contains the base already — and a 409 is ErrStaleBranch naming the
+// branch and its open pull request.
+func TestGitHubCreateBranchBringsAnExistingBranchUpToDate(t *testing.T) {
+	mux, gh := server(t)
+	mux.HandleFunc("/api/v3/repos/acme/management-clusters/git/ref/heads/main", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, map[string]any{refKey: "refs/heads/main", objectKey: map[string]any{shaKey: "base1"}})
+	})
+	createStatus := http.StatusCreated
+	mux.HandleFunc("/api/v3/repos/acme/management-clusters/git/refs", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(createStatus)
+		if createStatus == http.StatusCreated {
+			writeJSON(t, w, map[string]any{refKey: "refs/heads/feature", objectKey: map[string]any{shaKey: "base1"}})
+			return
+		}
+		writeJSON(t, w, map[string]any{messageKey: "Reference already exists"})
+	})
+	mergeStatus, merges := http.StatusCreated, 0
+	var merge map[string]any
+	mux.HandleFunc("/api/v3/repos/acme/management-clusters/merges", func(w http.ResponseWriter, r *http.Request) {
+		merges++
+		if err := json.NewDecoder(r.Body).Decode(&merge); err != nil {
+			t.Error(err)
+		}
+		w.WriteHeader(mergeStatus)
+		switch mergeStatus {
+		case http.StatusCreated:
+			writeJSON(t, w, map[string]any{shaKey: "merge1"})
+		case http.StatusConflict:
+			writeJSON(t, w, map[string]any{messageKey: "Merge conflict"})
+		}
+	})
+	mux.HandleFunc("/api/v3/repos/acme/management-clusters/pulls", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("head") != "acme:feature" || r.URL.Query().Get("state") != "open" {
+			t.Errorf("pull request lookup: %s", r.URL.RawQuery)
+		}
+		writeJSON(t, w, []map[string]any{{numberKey: 7, "html_url": "https://github.example/acme/management-clusters/pull/7", "head": map[string]any{refKey: featureBranch, shaKey: "old"}, "base": map[string]any{refKey: mainBranch}}})
+	})
+	ctx := context.Background()
+	if err := gh.CreateBranch(ctx, repoA, featureBranch, mainBranch); err != nil || merges != 0 {
+		t.Fatalf("new branch: err=%v merges=%d", err, merges)
+	}
+	createStatus = http.StatusUnprocessableEntity
+	if err := gh.CreateBranch(ctx, repoA, featureBranch, mainBranch); err != nil {
+		t.Fatalf("existing branch behind main: %v", err)
+	}
+	if merges != 1 || merge["base"] != featureBranch || merge["head"] != mainBranch || merge["commit_message"] != "Merge branch 'main' into feature" {
+		t.Errorf("merge request after %d merges: %v", merges, merge)
+	}
+	mergeStatus = http.StatusNoContent
+	if err := gh.CreateBranch(ctx, repoA, featureBranch, mainBranch); err != nil {
+		t.Errorf("existing branch that contains main: %v", err)
+	}
+	mergeStatus = http.StatusConflict
+	err := gh.CreateBranch(ctx, repoA, featureBranch, mainBranch)
+	if !errors.Is(err, ErrStaleBranch) || !strings.Contains(err.Error(), "acme/management-clusters@feature") || !strings.Contains(err.Error(), "/pull/7") {
+		t.Errorf("conflict: want ErrStaleBranch naming the branch and its pull request, got %v", err)
 	}
 }
 
@@ -351,4 +413,12 @@ const pathKey = "path"
 const (
 	treeKey = "tree"
 	typeKey = "type"
+)
+
+// numberKey, messageKey and objectKey are a pull request's number, an error's
+// message and a ref's object in the GitHub API.
+const (
+	numberKey  = "number"
+	messageKey = "message"
+	objectKey  = "object"
 )

@@ -242,6 +242,78 @@ func TestOpenReturnsWhatLandedBeforeAnError(t *testing.T) {
 	}
 }
 
+// TestOpenOntoAStaleBranchBringsItUpToDate: the branch an earlier run left
+// behind is behind main, which gained a directory since. The second run's
+// files, composed from the current main, land on a head that carries that
+// directory, in the pull request the first run opened.
+func TestOpenOntoAStaleBranchBringsItUpToDate(t *testing.T) {
+	f, req, changes := fixture(t)
+	ctx := context.Background()
+	first, err := Open(ctx, f, req, changes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	later := "management-clusters/example/later/values.yaml"
+	if err := f.Commit(ctx, repoA, mainBranch, "later", map[string][]byte{later: []byte("later")}); err != nil {
+		t.Fatal(err)
+	}
+	mainCommits := f.Commits(repoA, mainBranch)
+	mainHead := mainCommits[len(mainCommits)-1].SHA
+	dexKustomization := path(t, changes[0].Location, "kustomization.yaml")
+	changes[0].Files[dexKustomization] = []byte("resources: [a, ../later]")
+	second, err := Open(ctx, f, req, changes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second[0].Number != first[0].Number || second[0].HeadSHA == first[0].HeadSHA {
+		t.Errorf("second run: %+v, want the first run's pull request on a new head", second[0])
+	}
+	tree := f.Files(repoA, req.Branch)
+	if string(tree[later]) != "later" || string(tree[dexKustomization]) != "resources: [a, ../later]" {
+		t.Errorf("the head lacks main's later commit or the second run's files: %q", tree)
+	}
+	commits := f.Commits(repoA, req.Branch)
+	if len(commits) != 3 || commits[1].MergeParent != mainHead || commits[1].Message != "Merge branch 'main' into "+req.Branch || commits[2].Message != req.Title {
+		t.Errorf("commits on %s: %+v, want the first commit, the merge of main, the second commit", req.Branch, commits)
+	}
+	if commits := f.Commits(repoB, req.Branch); len(commits) != 2 {
+		t.Errorf("%s: %d commits, want two and no merge: its base did not move", repoB, len(commits))
+	}
+}
+
+// TestOpenOntoAStaleBranchRefusesAConflict: main and the stale branch changed
+// the same file differently. The run is refused naming the branch and its
+// pull request, nothing is opened, and the branch head stays where the
+// earlier run left it.
+func TestOpenOntoAStaleBranchRefusesAConflict(t *testing.T) {
+	f, req, changes := fixture(t)
+	ctx := context.Background()
+	changes[0].Files[readme] = []byte("the branch's readme")
+	first, err := Open(ctx, f, req, changes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Commit(ctx, repoA, mainBranch, "someone else", map[string][]byte{readme: []byte("main's readme")}); err != nil {
+		t.Fatal(err)
+	}
+	prs, err := Open(ctx, f, req, changes)
+	if !errors.Is(err, ErrStaleBranch) {
+		t.Fatalf("want ErrStaleBranch, got %v", err)
+	}
+	if !strings.Contains(err.Error(), repoA.String()+"@"+req.Branch) || !strings.Contains(err.Error(), first[0].URL) {
+		t.Errorf("the error does not name the branch and its pull request: %v", err)
+	}
+	if strings.Contains(err.Error(), generatedContent) {
+		t.Errorf("the error carries file content: %v", err)
+	}
+	if len(prs) != 0 {
+		t.Errorf("pull requests despite the refusal: %v", prs)
+	}
+	if commits := f.Commits(repoA, req.Branch); len(commits) != 1 || commits[0].SHA != first[0].HeadSHA {
+		t.Errorf("the stale branch moved: %+v", commits)
+	}
+}
+
 // TestNoSecretValueInErrorsOrLogs: an error from any step names the operation,
 // never the content; and the package has no way to log at all.
 func TestNoSecretValueInErrorsOrLogs(t *testing.T) {
