@@ -73,7 +73,8 @@ func NewGitHubWithClient(hc *http.Client, opts ...GitHubOption) (*GitHub, error)
 	return &GitHub{gh: gh}, nil
 }
 
-// CreateBranch creates branch at base's head; an existing branch is kept.
+// CreateBranch creates branch at base's head. An existing branch (GitHub
+// answers 422 to the create) is brought up to date with base instead.
 func (g *GitHub) CreateBranch(ctx context.Context, repo Repository, branch, base string) error {
 	baseRef, _, err := g.gh.Git.GetRef(ctx, repo.Owner, repo.Name, headsPrefix+base)
 	if err != nil {
@@ -83,10 +84,39 @@ func (g *GitHub) CreateBranch(ctx context.Context, repo Repository, branch, base
 		Ref: refsHeadPrefix + branch,
 		SHA: baseRef.GetObject().GetSHA(),
 	})
-	if err != nil && !hasStatus(err, http.StatusUnprocessableEntity) {
+	if err == nil {
+		return nil
+	}
+	if !hasStatus(err, http.StatusUnprocessableEntity) {
 		return wrap(OpCreateBranch, err)
 	}
-	return nil
+	return g.updateBranch(ctx, repo, branch, base)
+}
+
+// updateBranch merges base into the existing branch through GitHub's branch
+// merge, as the person and never a force push: 201 is the merge commit, 204
+// a branch that contains base already, 409 a merge that conflicts, which is
+// ErrStaleBranch naming the branch and its open pull request.
+func (g *GitHub) updateBranch(ctx context.Context, repo Repository, branch, base string) error {
+	_, _, err := g.gh.Repositories.Merge(ctx, repo.Owner, repo.Name, github.RepositoryMergeRequest{
+		Base:          branch,
+		Head:          base,
+		CommitMessage: new(updateMessage(branch, base)),
+	})
+	if err == nil {
+		return nil
+	}
+	if !hasStatus(err, http.StatusConflict) {
+		return wrap(OpCreateBranch, err)
+	}
+	pr, found, err := g.findPullRequest(ctx, repo, branch)
+	if err != nil {
+		return wrap(OpCreateBranch, err)
+	}
+	if !found {
+		return staleBranch(repo, branch, base, "")
+	}
+	return staleBranch(repo, branch, base, pr.URL)
 }
 
 // Commit writes one commit with files on top of branch: blobs, a tree on the

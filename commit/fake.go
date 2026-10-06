@@ -1,6 +1,7 @@
 package commit
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -25,14 +26,17 @@ type Fake struct {
 	prs     []*FakePullRequest
 }
 
-// FakeCommit is one commit the Fake holds; Files is the full tree at that commit.
+// FakeCommit is one commit the Fake holds; Files is the full tree at that
+// commit. MergeParent is set on the merge commit CreateBranch makes when it
+// brings an existing branch up to date: the base's head it merged in.
 type FakeCommit struct {
-	Repository Repository
-	Branch     string
-	Message    string
-	Parent     string
-	SHA        string
-	Files      map[string][]byte
+	Repository  Repository
+	Branch      string
+	Message     string
+	Parent      string
+	MergeParent string
+	SHA         string
+	Files       map[string][]byte
 }
 
 // FakePullRequest is a pull request the Fake holds, with what the remote knows about it.
@@ -120,7 +124,10 @@ func (f *Fake) SetChecks(pr PullRequest, state CheckState) {
 	}
 }
 
-// CreateBranch implements Remote.
+// CreateBranch implements Remote: a new branch starts at base's head; an
+// existing one that lacks base's head takes a merge commit with base's
+// changes since their common ancestor, or ErrStaleBranch when a path changed
+// on both sides differently.
 func (f *Fake) CreateBranch(_ context.Context, repo Repository, branch, base string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -131,10 +138,116 @@ func (f *Fake) CreateBranch(_ context.Context, repo Repository, branch, base str
 	if !ok {
 		return fmt.Errorf("%s: %s has no branch %q", OpCreateBranch, repo, base)
 	}
-	if _, exists := f.heads[key(repo, branch)]; !exists {
+	head, exists := f.heads[key(repo, branch)]
+	if !exists {
 		f.heads[key(repo, branch)] = baseSHA
+		return nil
 	}
+	if f.contains(head, baseSHA) {
+		return nil
+	}
+	tree, ok := f.merge(head, baseSHA)
+	if !ok {
+		if pr := f.findOpen(repo, branch); pr != nil {
+			return staleBranch(repo, branch, base, pr.URL)
+		}
+		return staleBranch(repo, branch, base, "")
+	}
+	f.writeMerge(repo, branch, updateMessage(branch, base), head, baseSHA, tree)
 	return nil
+}
+
+// contains reports whether target is sha or in its history, through both
+// parents of a merge commit.
+func (f *Fake) contains(sha, target string) bool {
+	seen := map[string]bool{}
+	for stack := []string{sha}; len(stack) > 0; {
+		s := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if s == target {
+			return true
+		}
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		c := f.commits[s]
+		stack = append(stack, c.Parent, c.MergeParent)
+	}
+	return false
+}
+
+// mergeBase is the nearest commit in both histories, "" (the empty tree)
+// when they never met.
+func (f *Fake) mergeBase(a, b string) string {
+	ancestors := map[string]bool{}
+	for stack := []string{a}; len(stack) > 0; {
+		s := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if s == "" || ancestors[s] {
+			continue
+		}
+		ancestors[s] = true
+		c := f.commits[s]
+		stack = append(stack, c.Parent, c.MergeParent)
+	}
+	seen := map[string]bool{}
+	for queue := []string{b}; len(queue) > 0; {
+		s := queue[0]
+		queue = queue[1:]
+		if s == "" || seen[s] {
+			continue
+		}
+		if ancestors[s] {
+			return s
+		}
+		seen[s] = true
+		c := f.commits[s]
+		queue = append(queue, c.Parent, c.MergeParent)
+	}
+	return ""
+}
+
+// merge is the three-way merge of the trees at ours and theirs against their
+// common ancestor: a path only theirs changed takes theirs, a path only ours
+// changed keeps ours, a path both changed the same way is no conflict; a path
+// both changed differently is, and the merge is refused.
+func (f *Fake) merge(ours, theirs string) (map[string][]byte, bool) {
+	common := f.commits[f.mergeBase(ours, theirs)].Files
+	ourTree, theirTree := f.commits[ours].Files, f.commits[theirs].Files
+	tree := maps.Clone(ourTree)
+	if tree == nil {
+		tree = map[string][]byte{}
+	}
+	paths := map[string]bool{}
+	for path := range theirTree {
+		paths[path] = true
+	}
+	for path := range common {
+		paths[path] = true
+	}
+	for path := range paths {
+		was, inCommon := common[path]
+		their, inTheirs := theirTree[path]
+		our, inOurs := ourTree[path]
+		if sameEntry(their, inTheirs, was, inCommon) {
+			continue
+		}
+		if !sameEntry(our, inOurs, was, inCommon) && !sameEntry(our, inOurs, their, inTheirs) {
+			return nil, false
+		}
+		if inTheirs {
+			tree[path] = their
+		} else {
+			delete(tree, path)
+		}
+	}
+	return tree, true
+}
+
+// sameEntry: two tree entries are the same when both are absent or both carry the same content.
+func sameEntry(a []byte, inA bool, b []byte, inB bool) bool {
+	return inA == inB && bytes.Equal(a, b)
 }
 
 // Commit implements Remote.
@@ -419,14 +532,20 @@ func (f *Fake) find(pr PullRequest) *FakePullRequest {
 // write stores a commit whose sha is derived from its parent, message and tree,
 // and moves the branch head to it. The caller holds the lock.
 func (f *Fake) write(repo Repository, branch, message, parent string, tree map[string][]byte) {
+	f.writeMerge(repo, branch, message, parent, "", tree)
+}
+
+// writeMerge is write for a commit with a second parent, the base head a
+// merge brought in; "" for an ordinary commit.
+func (f *Fake) writeMerge(repo Repository, branch, message, parent, mergeParent string, tree map[string][]byte) {
 	h := sha256.New()
-	h.Write([]byte(parent + "\n" + message + "\n"))
+	h.Write([]byte(parent + "\n" + mergeParent + "\n" + message + "\n"))
 	for _, path := range slices.Sorted(maps.Keys(tree)) {
 		h.Write([]byte(path + "\n"))
 		h.Write(tree[path])
 	}
 	sha := hex.EncodeToString(h.Sum(nil))[:40]
-	f.commits[sha] = FakeCommit{Repository: repo, Branch: branch, Message: message, Parent: parent, SHA: sha, Files: maps.Clone(tree)}
+	f.commits[sha] = FakeCommit{Repository: repo, Branch: branch, Message: message, Parent: parent, MergeParent: mergeParent, SHA: sha, Files: maps.Clone(tree)}
 	f.heads[key(repo, branch)] = sha
 }
 

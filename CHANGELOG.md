@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `commit`: a commit onto a branch an earlier run left behind its base no longer lands on the old head. `CreateBranch` brings an existing branch up to date first — the base merged into it as the person (GitHub's branch merge, never a force push) — or refuses with `ErrStaleBranch`, naming the branch and its open pull request, when the base does not merge into it; files composed from the base's current content never land on a head that lacks it. `Fake` models the stale branch (the merge, or the conflict) the same way.
+
 - Dependencies with known vulnerabilities bumped (nancy): golang.org/x/crypto v0.57.0, google.golang.org/grpc v1.84.0, go.opentelemetry.io/otel and otel/sdk v1.46.0, go.mongodb.org/mongo-driver v1.17.10.
 
 - `provenance`: a GitRepository on GitHub's SSH endpoint on port 443 (`ssh://git@ssh.github.com:443/owner/name.git`, for networks that block port 22) names its GitHub repository; `ParseRepositoryURL` refused the host `ssh.github.com` as not GitHub, so a target reconciled from such a source had no commit target.

@@ -80,7 +80,11 @@ type Status struct {
 // Remote is the git hosting the package talks to: GitHub in production, Fake
 // in tests. Every operation acts with the token the Remote was built from.
 type Remote interface {
-	// CreateBranch creates branch from base; a branch that exists is left as it is.
+	// CreateBranch creates branch from base. A branch that exists is brought
+	// up to date: base is merged into it when it is behind (a merge commit,
+	// history never rewritten), or ErrStaleBranch names the branch and its
+	// open pull request when base does not merge into it. The branch's head
+	// contains base when CreateBranch returns nil.
 	CreateBranch(ctx context.Context, repo Repository, branch, base string) error
 	// Commit adds one commit with files to branch; a path whose content is
 	// nil is removed.
@@ -161,6 +165,9 @@ var (
 	ErrConflictingBase = errors.New("one repository, two base branches")
 	// ErrDuplicatePath: two changes for one repository write the same path.
 	ErrDuplicatePath = errors.New("one path in two changes")
+	// ErrStaleBranch: the existing branch is behind its base and base does not
+	// merge into it; nothing is committed onto a head that lacks the base.
+	ErrStaleBranch = errors.New("branch behind its base and the base does not merge into it")
 	// ErrNotApproved: the caller has not said approved.
 	ErrNotApproved = errors.New("merge refused: not approved")
 	// ErrChecksPending: a status or check run on the head has not finished.
@@ -176,6 +183,21 @@ var (
 	// ErrFileNotFound: the branch carries no file at the path.
 	ErrFileNotFound = errors.New("no such file")
 )
+
+// updateMessage is the message of the merge commit that brings an existing
+// branch up to date with its base, the same on every Remote.
+func updateMessage(branch, base string) string {
+	return fmt.Sprintf("Merge branch '%s' into %s", base, branch)
+}
+
+// staleBranch is ErrStaleBranch naming the branch and, when it has one, its
+// open pull request (prURL empty otherwise).
+func staleBranch(repo Repository, branch, base, prURL string) error {
+	if prURL == "" {
+		return fmt.Errorf("%s: %w: %s@%s behind %s, no open pull request", OpCreateBranch, ErrStaleBranch, repo, branch, base)
+	}
+	return fmt.Errorf("%s: %w: %s@%s behind %s, pull request %s", OpCreateBranch, ErrStaleBranch, repo, branch, base, prURL)
+}
 
 // revertBranch, revertTitle and revertMessage name what Revert makes, the same
 // on every Remote. The "revert:" prefix keeps the title past a semantic pull
@@ -202,8 +224,11 @@ func (e *AuthError) Unwrap() error { return ErrAuth }
 
 // Open lands the changes: for every repository one branch from its base, one
 // commit with all of that repository's files, one pull request with the
-// caller's title and body. Repositories are handled in name order; on an
-// error the pull requests opened so far are returned with it.
+// caller's title and body. A branch an earlier run left behind is brought up
+// to date with its base first, so files composed from the base's current
+// content never land on a head that lacks it (ErrStaleBranch when the base
+// does not merge in). Repositories are handled in name order; on an error the
+// pull requests opened so far are returned with it.
 func Open(ctx context.Context, remote Remote, req Request, changes []Change) ([]PullRequest, error) {
 	if req.Branch == "" || req.Title == "" {
 		return nil, ErrInvalidRequest
