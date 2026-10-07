@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `commit`: `Revert` no longer orphans its commit when the revert branch exists from an earlier revert. The revert branch is brought into existence or up to date with the pull request's base the way `CreateBranch` does — the base merged into it as the person, or `ErrStaleBranch` naming the branch and the revert pull request when the base does not merge in — and the inverted files are committed on its head, so a second revert adds a commit to the open revert pull request, returned on its new head. `GitHub.Revert` reverts onto the pull request's base, as `Fake.Revert` and the `Remote` contract do, not the repository's default branch. A removal of a path the head does not carry is no change on `GitHub` as on `Fake`, where GitHub refused the tree.
+
 - `commit`: a commit onto a branch an earlier run left behind its base no longer lands on the old head. `CreateBranch` brings an existing branch up to date first — the base merged into it as the person (GitHub's branch merge, never a force push) — or refuses with `ErrStaleBranch`, naming the branch and its open pull request, when the base does not merge into it; files composed from the base's current content never land on a head that lacks it. `Fake` models the stale branch (the merge, or the conflict) the same way.
 
 - Dependencies with known vulnerabilities bumped (nancy): golang.org/x/crypto v0.57.0, google.golang.org/grpc v1.84.0, go.opentelemetry.io/otel and otel/sdk v1.46.0, go.mongodb.org/mongo-driver v1.17.10.

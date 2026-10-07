@@ -14,6 +14,8 @@ const (
 	bothFile      = "both.yaml"
 	sopsConfig    = ".sops.yaml"
 	featureBranch = "feature"
+	laterFile     = "later.yaml"
+	laterContent  = "later"
 )
 
 // opened seeds a branch with one commit off main and opens its pull request.
@@ -149,7 +151,7 @@ func TestRevertInvertsTheMergedChangeOnTheTip(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The tip moves on after the merge; the revert lands on top of it.
-	if err := f.Commit(ctx, repoA, mainBranch, "later", map[string][]byte{"later.yaml": []byte("later")}); err != nil {
+	if err := f.Commit(ctx, repoA, mainBranch, laterContent, map[string][]byte{laterFile: []byte(laterContent)}); err != nil {
 		t.Fatal(err)
 	}
 	revert, err := f.Revert(ctx, pr, "Reverts the change.", map[string][]byte{sopsConfig: []byte("rules: [a, c]")})
@@ -160,7 +162,7 @@ func TestRevertInvertsTheMergedChangeOnTheTip(t *testing.T) {
 		t.Errorf("revert branch/base: %+v", revert)
 	}
 	files := f.Files(repoA, revert.Head)
-	want := map[string]string{readme: "hello", sopsConfig: "rules: [a, c]", oldFile: "old", "later.yaml": "later"}
+	want := map[string]string{readme: "hello", sopsConfig: "rules: [a, c]", oldFile: "old", laterFile: laterContent}
 	if len(files) != len(want) {
 		t.Errorf("revert tree has %d files, want %d: %q", len(files), len(want), files)
 	}
@@ -177,8 +179,78 @@ func TestRevertInvertsTheMergedChangeOnTheTip(t *testing.T) {
 	if msg := commits[len(commits)-1].Message; !strings.HasPrefix(msg, `Revert "Change" (#1)`) || !strings.HasSuffix(msg, "Reverts the change.") {
 		t.Errorf("revert commit message: %q", msg)
 	}
-	if again, err := f.Revert(ctx, pr, "again", nil); err != nil || again.Number != revert.Number {
-		t.Errorf("a second revert did not reuse the open revert pull request: %+v %v", again, err)
+}
+
+// mergedAndReverted merges a pull request that adds oneFile and reverts it once.
+func mergedAndReverted(t *testing.T, f *Fake) (merged, revert PullRequest) {
+	t.Helper()
+	ctx := context.Background()
+	merged = opened(t, f, featureBranch, map[string][]byte{oneFile: []byte("a")})
+	if err := Merge(ctx, f, merged, true); err != nil {
+		t.Fatal(err)
+	}
+	revert, err := f.Revert(ctx, merged, "first", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return merged, revert
+}
+
+// TestRevertAgainAddsACommitToTheOpenRevertPullRequest: a second revert while
+// the revert pull request is open brings the revert branch up to date with
+// the base and lands a new commit on its head; the earlier head stays in its
+// history and the open revert pull request is returned on the new head.
+func TestRevertAgainAddsACommitToTheOpenRevertPullRequest(t *testing.T) {
+	f, _, _ := fixture(t)
+	ctx := context.Background()
+	pr, revert := mergedAndReverted(t, f)
+	if err := f.Commit(ctx, repoA, mainBranch, laterContent, map[string][]byte{laterFile: []byte(laterContent)}); err != nil {
+		t.Fatal(err)
+	}
+	again, err := f.Revert(ctx, pr, "again", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Number != revert.Number || again.Head != revert.Head || again.HeadSHA == revert.HeadSHA {
+		t.Fatalf("second revert: %+v, first %+v: want the same pull request on a new head", again, revert)
+	}
+	if head := f.heads[key(repoA, revert.Head)]; head != again.HeadSHA {
+		t.Errorf("revert branch head %s, returned %s", head, again.HeadSHA)
+	}
+	tip := f.heads[key(repoA, mainBranch)]
+	if !f.contains(again.HeadSHA, revert.HeadSHA) || !f.contains(again.HeadSHA, tip) {
+		t.Errorf("new head %s lacks the earlier head %s or the base's tip %s", again.HeadSHA, revert.HeadSHA, tip)
+	}
+	commits := f.Commits(repoA, revert.Head)
+	if last := commits[len(commits)-1]; last.Parent == "" || !strings.HasSuffix(last.Message, "again") || f.commits[last.Parent].MergeParent != tip {
+		t.Errorf("want the base merged in and the revert on top, got %+v", last)
+	}
+	files := f.Files(repoA, revert.Head)
+	if _, kept := files[oneFile]; kept || string(files[laterFile]) != laterContent {
+		t.Errorf("revert tree: %q", files)
+	}
+}
+
+// TestRevertRefusesARevertBranchTheBaseDoesNotMergeInto: the base changed the
+// file the revert removes, so it does not merge into the revert branch; the
+// revert is refused naming the branch and the revert pull request, the head
+// unmoved.
+func TestRevertRefusesARevertBranchTheBaseDoesNotMergeInto(t *testing.T) {
+	f, _, _ := fixture(t)
+	ctx := context.Background()
+	pr, revert := mergedAndReverted(t, f)
+	if err := f.Commit(ctx, repoA, mainBranch, "changed on main", map[string][]byte{oneFile: []byte("b")}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := f.Revert(ctx, pr, "again", nil)
+	if !errors.Is(err, ErrStaleBranch) || !strings.Contains(err.Error(), repoA.String()+"@"+revert.Head) || !strings.Contains(err.Error(), revert.URL) {
+		t.Errorf("want ErrStaleBranch naming the revert branch and its pull request, got %v", err)
+	}
+	if !strings.HasPrefix(err.Error(), OpRevert+": ") {
+		t.Errorf("error does not name the operation: %v", err)
+	}
+	if head := f.heads[key(repoA, revert.Head)]; head != revert.HeadSHA {
+		t.Errorf("a refused revert moved the head from %s to %s", revert.HeadSHA, head)
 	}
 }
 

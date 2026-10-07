@@ -111,9 +111,13 @@ type Remote interface {
 	// its head branch; a closed pull request is left as it is.
 	Close(ctx context.Context, pr PullRequest, deleteBranch bool) error
 	// Revert opens a pull request undoing a merged one: the merged change's
-	// files are inverted in one commit on the current tip of the base — added
-	// files removed, changed and removed files restored — except the paths in
-	// overrides, which take the given content. History is never rewritten.
+	// files are inverted in one commit — added files removed, changed and
+	// removed files restored — except the paths in overrides, which take the
+	// given content. The commit lands on the head of the revert branch, which
+	// is created at the base's tip or brought up to date with it as
+	// CreateBranch does (ErrStaleBranch naming the branch and its pull request
+	// when the base does not merge in); a second revert adds a commit to the
+	// open revert pull request. History is never rewritten.
 	Revert(ctx context.Context, pr PullRequest, body string, overrides map[string][]byte) (PullRequest, error)
 }
 
@@ -190,13 +194,13 @@ func updateMessage(branch, base string) string {
 	return fmt.Sprintf("Merge branch '%s' into %s", base, branch)
 }
 
-// staleBranch is ErrStaleBranch naming the branch and, when it has one, its
+// staleBranch is ErrStaleBranch from op naming the branch and, when it has one, its
 // open pull request (prURL empty otherwise).
-func staleBranch(repo Repository, branch, base, prURL string) error {
+func staleBranch(op string, repo Repository, branch, base, prURL string) error {
 	if prURL == "" {
-		return fmt.Errorf("%s: %w: %s@%s behind %s, no open pull request", OpCreateBranch, ErrStaleBranch, repo, branch, base)
+		return fmt.Errorf("%s: %w: %s@%s behind %s, no open pull request", op, ErrStaleBranch, repo, branch, base)
 	}
-	return fmt.Errorf("%s: %w: %s@%s behind %s, pull request %s", OpCreateBranch, ErrStaleBranch, repo, branch, base, prURL)
+	return fmt.Errorf("%s: %w: %s@%s behind %s, pull request %s", op, ErrStaleBranch, repo, branch, base, prURL)
 }
 
 // revertBranch, revertTitle and revertMessage name what Revert makes, the same

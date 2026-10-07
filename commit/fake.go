@@ -134,9 +134,15 @@ func (f *Fake) CreateBranch(_ context.Context, repo Repository, branch, base str
 	if err := f.Fail[OpCreateBranch]; err != nil {
 		return err
 	}
+	return f.createBranch(OpCreateBranch, repo, branch, base)
+}
+
+// createBranch is CreateBranch with its errors named for op. The caller
+// holds the lock.
+func (f *Fake) createBranch(op string, repo Repository, branch, base string) error {
 	baseSHA, ok := f.heads[key(repo, base)]
 	if !ok {
-		return fmt.Errorf("%s: %s has no branch %q", OpCreateBranch, repo, base)
+		return fmt.Errorf("%s: %s has no branch %q", op, repo, base)
 	}
 	head, exists := f.heads[key(repo, branch)]
 	if !exists {
@@ -149,9 +155,9 @@ func (f *Fake) CreateBranch(_ context.Context, repo Repository, branch, base str
 	tree, ok := f.merge(head, baseSHA)
 	if !ok {
 		if pr := f.findOpen(repo, branch); pr != nil {
-			return staleBranch(repo, branch, base, pr.URL)
+			return staleBranch(op, repo, branch, base, pr.URL)
 		}
-		return staleBranch(repo, branch, base, "")
+		return staleBranch(op, repo, branch, base, "")
 	}
 	f.writeMerge(repo, branch, updateMessage(branch, base), head, baseSHA, tree)
 	return nil
@@ -260,9 +266,15 @@ func (f *Fake) Commit(_ context.Context, repo Repository, branch, message string
 	if len(files) == 0 {
 		return ErrNoFiles
 	}
+	return f.commit(OpCommit, repo, branch, message, files)
+}
+
+// commit writes one commit with files on top of branch's head, its errors
+// named for op. The caller holds the lock.
+func (f *Fake) commit(op string, repo Repository, branch, message string, files map[string][]byte) error {
 	parent, ok := f.heads[key(repo, branch)]
 	if !ok {
-		return fmt.Errorf("%s: %s has no branch %q", OpCommit, repo, branch)
+		return fmt.Errorf("%s: %s has no branch %q", op, repo, branch)
 	}
 	tree := maps.Clone(f.commits[parent].Files)
 	if tree == nil {
@@ -421,7 +433,9 @@ func (f *Fake) Close(_ context.Context, pr PullRequest, deleteBranch bool) error
 }
 
 // Revert implements Remote: the merged pull request's files, inverted against
-// the base as it was at the merge, in one commit on the base's tip.
+// the base as it was at the merge, in one commit on the head of the revert
+// branch, created at the base's tip or brought up to date with it as
+// CreateBranch does.
 func (f *Fake) Revert(_ context.Context, pr PullRequest, body string, overrides map[string][]byte) (PullRequest, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -450,26 +464,24 @@ func (f *Fake) Revert(_ context.Context, pr PullRequest, body string, overrides 
 	if len(changed) == 0 {
 		return PullRequest{}, ErrNothingToRevert
 	}
-	tipSHA := f.heads[key(p.Repository, p.Base)]
-	tree := maps.Clone(f.commits[tipSHA].Files)
-	if tree == nil {
-		tree = map[string][]byte{}
-	}
+	files := make(map[string][]byte, len(changed))
 	for path := range changed {
 		switch content, was := before[path]; {
 		case overrides[path] != nil:
-			tree[path] = overrides[path]
+			files[path] = overrides[path]
 		case was:
-			tree[path] = content
+			files[path] = content
 		default:
-			delete(tree, path)
+			files[path] = nil
 		}
 	}
 	branch := revertBranch(p.PullRequest)
-	if _, exists := f.heads[key(p.Repository, branch)]; !exists {
-		f.heads[key(p.Repository, branch)] = tipSHA
+	if err := f.createBranch(OpRevert, p.Repository, branch, p.Base); err != nil {
+		return PullRequest{}, err
 	}
-	f.write(p.Repository, branch, revertMessage(p.PullRequest, p.Title, body), tipSHA, tree)
+	if err := f.commit(OpRevert, p.Repository, branch, revertMessage(p.PullRequest, p.Title, body), files); err != nil {
+		return PullRequest{}, err
+	}
 	return f.openLocked(p.Repository, branch, p.Base, revertTitle(p.Title), body, false)
 }
 
