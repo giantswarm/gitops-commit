@@ -76,9 +76,15 @@ func NewGitHubWithClient(hc *http.Client, opts ...GitHubOption) (*GitHub, error)
 // CreateBranch creates branch at base's head. An existing branch (GitHub
 // answers 422 to the create) is brought up to date with base instead.
 func (g *GitHub) CreateBranch(ctx context.Context, repo Repository, branch, base string) error {
+	return g.createBranch(ctx, OpCreateBranch, repo, branch, base)
+}
+
+// createBranch is CreateBranch with its errors named for op, the operation
+// that brings the branch into existence or up to date.
+func (g *GitHub) createBranch(ctx context.Context, op string, repo Repository, branch, base string) error {
 	baseRef, _, err := g.gh.Git.GetRef(ctx, repo.Owner, repo.Name, headsPrefix+base)
 	if err != nil {
-		return wrap(OpCreateBranch, err)
+		return wrap(op, err)
 	}
 	_, _, err = g.gh.Git.CreateRef(ctx, repo.Owner, repo.Name, github.CreateRef{
 		Ref: refsHeadPrefix + branch,
@@ -88,16 +94,16 @@ func (g *GitHub) CreateBranch(ctx context.Context, repo Repository, branch, base
 		return nil
 	}
 	if !hasStatus(err, http.StatusUnprocessableEntity) {
-		return wrap(OpCreateBranch, err)
+		return wrap(op, err)
 	}
-	return g.updateBranch(ctx, repo, branch, base)
+	return g.updateBranch(ctx, op, repo, branch, base)
 }
 
 // updateBranch merges base into the existing branch through GitHub's branch
 // merge, as the person and never a force push: 201 is the merge commit, 204
 // a branch that contains base already, 409 a merge that conflicts, which is
 // ErrStaleBranch naming the branch and its open pull request.
-func (g *GitHub) updateBranch(ctx context.Context, repo Repository, branch, base string) error {
+func (g *GitHub) updateBranch(ctx context.Context, op string, repo Repository, branch, base string) error {
 	_, _, err := g.gh.Repositories.Merge(ctx, repo.Owner, repo.Name, github.RepositoryMergeRequest{
 		Base:          branch,
 		Head:          base,
@@ -107,16 +113,16 @@ func (g *GitHub) updateBranch(ctx context.Context, repo Repository, branch, base
 		return nil
 	}
 	if !hasStatus(err, http.StatusConflict) {
-		return wrap(OpCreateBranch, err)
+		return wrap(op, err)
 	}
 	pr, found, err := g.findPullRequest(ctx, repo, branch)
 	if err != nil {
-		return wrap(OpCreateBranch, err)
+		return wrap(op, err)
 	}
 	if !found {
-		return staleBranch(repo, branch, base, "")
+		return staleBranch(op, repo, branch, base, "")
 	}
-	return staleBranch(repo, branch, base, pr.URL)
+	return staleBranch(op, repo, branch, base, pr.URL)
 }
 
 // Commit writes one commit with files on top of branch: blobs, a tree on the
@@ -126,15 +132,6 @@ func (g *GitHub) Commit(ctx context.Context, repo Repository, branch, message st
 	if len(files) == 0 {
 		return ErrNoFiles
 	}
-	ref, _, err := g.gh.Git.GetRef(ctx, repo.Owner, repo.Name, headsPrefix+branch)
-	if err != nil {
-		return wrap(OpCommit, err)
-	}
-	headSHA := ref.GetObject().GetSHA()
-	head, _, err := g.gh.Git.GetCommit(ctx, repo.Owner, repo.Name, headSHA)
-	if err != nil {
-		return wrap(OpCommit, err)
-	}
 	paths := slices.Sorted(maps.Keys(files))
 	entries := make([]*github.TreeEntry, 0, len(paths))
 	for _, path := range paths {
@@ -142,37 +139,74 @@ func (g *GitHub) Commit(ctx context.Context, repo Repository, branch, message st
 			entries = append(entries, deletedEntry(path))
 			continue
 		}
-		blob, _, err := g.gh.Git.CreateBlob(ctx, repo.Owner, repo.Name, github.Blob{
-			Content:  new(base64.StdEncoding.EncodeToString(files[path])),
-			Encoding: new("base64"),
-		})
+		entry, err := g.blobEntry(ctx, OpCommit, repo, path, files[path])
 		if err != nil {
-			return wrap(OpCommit, err)
+			return err
 		}
-		entries = append(entries, &github.TreeEntry{
-			Path: new(path),
-			Mode: new(blobMode),
-			Type: new(blobType),
-			SHA:  new(blob.GetSHA()),
-		})
+		entries = append(entries, entry)
 	}
-	tree, _, err := g.gh.Git.CreateTree(ctx, repo.Owner, repo.Name, head.GetTree().GetSHA(), entries)
+	_, err := g.commitEntries(ctx, OpCommit, repo, branch, message, entries)
+	return err
+}
+
+// commitEntries writes one commit of entries on top of branch's head — a
+// tree on the head's tree, the commit, a fast-forward of the branch — with
+// its errors named for op. A removal of a path the head lacks is no change.
+func (g *GitHub) commitEntries(ctx context.Context, op string, repo Repository, branch, message string, entries []*github.TreeEntry) (string, error) {
+	ref, _, err := g.gh.Git.GetRef(ctx, repo.Owner, repo.Name, headsPrefix+branch)
 	if err != nil {
-		return wrap(OpCommit, err)
+		return "", wrap(op, err)
+	}
+	headSHA := ref.GetObject().GetSHA()
+	head, _, err := g.gh.Git.GetCommit(ctx, repo.Owner, repo.Name, headSHA)
+	if err != nil {
+		return "", wrap(op, err)
+	}
+	entries, err = g.presentRemovals(ctx, op, repo, headSHA, entries)
+	if err != nil {
+		return "", err
+	}
+	treeSHA := head.GetTree().GetSHA()
+	if len(entries) > 0 {
+		tree, _, err := g.gh.Git.CreateTree(ctx, repo.Owner, repo.Name, treeSHA, entries)
+		if err != nil {
+			return "", wrap(op, err)
+		}
+		treeSHA = tree.GetSHA()
 	}
 	commit, _, err := g.gh.Git.CreateCommit(ctx, repo.Owner, repo.Name, github.Commit{
 		Message: new(message),
-		Tree:    &github.Tree{SHA: new(tree.GetSHA())},
+		Tree:    &github.Tree{SHA: new(treeSHA)},
 		Parents: []*github.Commit{{SHA: new(headSHA)}},
 	}, nil)
 	if err != nil {
-		return wrap(OpCommit, err)
+		return "", wrap(op, err)
 	}
 	_, _, err = g.gh.Git.UpdateRef(ctx, repo.Owner, repo.Name, refsHeadPrefix+branch, github.UpdateRef{SHA: commit.GetSHA()})
 	if err != nil {
-		return wrap(OpCommit, err)
+		return "", wrap(op, err)
 	}
-	return nil
+	return commit.GetSHA(), nil
+}
+
+// presentRemovals drops the removal of a path the commit at sha does not
+// carry: GitHub refuses a tree that removes an absent path, where removing
+// nothing is no change — a second revert removes what the first did.
+func (g *GitHub) presentRemovals(ctx context.Context, op string, repo Repository, sha string, entries []*github.TreeEntry) ([]*github.TreeEntry, error) {
+	kept := make([]*github.TreeEntry, 0, len(entries))
+	for _, entry := range entries {
+		if entry.SHA == nil && entry.Content == nil {
+			_, _, _, err := g.gh.Repositories.GetContents(ctx, repo.Owner, repo.Name, entry.GetPath(), &github.RepositoryContentGetOptions{Ref: sha})
+			if hasStatus(err, http.StatusNotFound) {
+				continue
+			}
+			if err != nil {
+				return nil, wrap(op, err)
+			}
+		}
+		kept = append(kept, entry)
+	}
+	return kept, nil
 }
 
 // OpenPullRequest opens head against base with the caller's title and body.
@@ -361,8 +395,11 @@ func (g *GitHub) Close(ctx context.Context, pr PullRequest, deleteBranch bool) e
 }
 
 // Revert opens a pull request undoing the merged pr: the merge commit's diff
-// against its first parent, inverted into one commit on the tip of the
-// repository's default branch, on branch revert-<number>-<head>.
+// against its first parent, inverted into one commit on branch
+// revert-<number>-<head>. The branch is brought into existence or up to date
+// with the pull request's base the way CreateBranch does — ErrStaleBranch
+// when the base does not merge into it — and the commit lands on its head, so
+// a second revert adds a commit to the open revert pull request.
 func (g *GitHub) Revert(ctx context.Context, pr PullRequest, body string, overrides map[string][]byte) (PullRequest, error) {
 	owner, name := pr.Repository.Owner, pr.Repository.Name
 	got, _, err := g.gh.PullRequests.Get(ctx, owner, name, pr.Number)
@@ -388,43 +425,28 @@ func (g *GitHub) Revert(ctx context.Context, pr PullRequest, body string, overri
 	if len(compare.Files) == 0 {
 		return PullRequest{}, ErrNothingToRevert
 	}
-	settings, _, err := g.gh.Repositories.Get(ctx, owner, name)
-	if err != nil {
-		return PullRequest{}, wrap(OpRevert, err)
-	}
-	base := settings.GetDefaultBranch()
-	tipRef, _, err := g.gh.Git.GetRef(ctx, owner, name, headsPrefix+base)
-	if err != nil {
-		return PullRequest{}, wrap(OpRevert, err)
-	}
-	tipSHA := tipRef.GetObject().GetSHA()
-	tip, _, err := g.gh.Git.GetCommit(ctx, owner, name, tipSHA)
-	if err != nil {
-		return PullRequest{}, wrap(OpRevert, err)
-	}
 	entries, err := g.revertEntries(ctx, pr.Repository, parentSHA, compare.Files, overrides)
 	if err != nil {
 		return PullRequest{}, err
 	}
-	tree, _, err := g.gh.Git.CreateTree(ctx, owner, name, tip.GetTree().GetSHA(), entries)
-	if err != nil {
-		return PullRequest{}, wrap(OpRevert, err)
-	}
+	base := got.GetBase().GetRef()
 	pr.Head = got.GetHead().GetRef()
-	commit, _, err := g.gh.Git.CreateCommit(ctx, owner, name, github.Commit{
-		Message: new(revertMessage(pr, got.GetTitle(), body)),
-		Tree:    &github.Tree{SHA: new(tree.GetSHA())},
-		Parents: []*github.Commit{{SHA: new(tipSHA)}},
-	}, nil)
-	if err != nil {
-		return PullRequest{}, wrap(OpRevert, err)
-	}
 	branch := revertBranch(pr)
-	_, _, err = g.gh.Git.CreateRef(ctx, owner, name, github.CreateRef{Ref: refsHeadPrefix + branch, SHA: commit.GetSHA()})
-	if err != nil && !hasStatus(err, http.StatusUnprocessableEntity) {
-		return PullRequest{}, wrap(OpRevert, err)
+	if err := g.createBranch(ctx, OpRevert, pr.Repository, branch, base); err != nil {
+		return PullRequest{}, err
 	}
-	return g.openPullRequest(ctx, pr.Repository, branch, base, revertTitle(got.GetTitle()), body, false)
+	headSHA, err := g.commitEntries(ctx, OpRevert, pr.Repository, branch, revertMessage(pr, got.GetTitle(), body), entries)
+	if err != nil {
+		return PullRequest{}, err
+	}
+	revert, err := g.openPullRequest(ctx, pr.Repository, branch, base, revertTitle(got.GetTitle()), body, false)
+	if err != nil {
+		return PullRequest{}, err
+	}
+	// GitHub updates an open pull request's head after the push; the commit
+	// just written is the head.
+	revert.HeadSHA = headSHA
+	return revert, nil
 }
 
 // revertEntries inverts a compare's file list: an added file is deleted, a
@@ -435,7 +457,7 @@ func (g *GitHub) revertEntries(ctx context.Context, repo Repository, parentSHA s
 	for _, f := range files {
 		path := f.GetFilename()
 		if content, ok := overrides[path]; ok {
-			entry, err := g.blobEntry(ctx, repo, path, content)
+			entry, err := g.blobEntry(ctx, OpRevert, repo, path, content)
 			if err != nil {
 				return nil, err
 			}
@@ -473,16 +495,16 @@ func (g *GitHub) restoredEntry(ctx context.Context, repo Repository, sha, path s
 	if err != nil {
 		return nil, fmt.Errorf("%s: %s at %s: %w", OpRevert, path, sha, err)
 	}
-	return g.blobEntry(ctx, repo, path, []byte(content))
+	return g.blobEntry(ctx, OpRevert, repo, path, []byte(content))
 }
 
-func (g *GitHub) blobEntry(ctx context.Context, repo Repository, path string, content []byte) (*github.TreeEntry, error) {
+func (g *GitHub) blobEntry(ctx context.Context, op string, repo Repository, path string, content []byte) (*github.TreeEntry, error) {
 	blob, _, err := g.gh.Git.CreateBlob(ctx, repo.Owner, repo.Name, github.Blob{
 		Content:  new(base64.StdEncoding.EncodeToString(content)),
 		Encoding: new("base64"),
 	})
 	if err != nil {
-		return nil, wrap(OpRevert, err)
+		return nil, wrap(op, err)
 	}
 	return &github.TreeEntry{Path: new(path), Mode: new(blobMode), Type: new(blobType), SHA: new(blob.GetSHA())}, nil
 }

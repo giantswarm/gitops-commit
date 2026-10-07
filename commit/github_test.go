@@ -154,7 +154,7 @@ func TestGitHubCloseLeavesAClosedPullRequestAlone(t *testing.T) {
 		if r.Method == http.MethodPatch {
 			edits++
 		}
-		writeJSON(t, w, map[string]any{numberKey: 7, "state": "closed", "head": map[string]any{"ref": featureBranch}})
+		writeJSON(t, w, map[string]any{numberKey: 7, "state": "closed", headKey: map[string]any{"ref": featureBranch}})
 	})
 	if err := gh.Close(context.Background(), PullRequest{Repository: repoA, Number: 7}, true); err != nil || edits != 0 {
 		t.Errorf("closing a closed pull request: err=%v edits=%d", err, edits)
@@ -232,7 +232,7 @@ func TestGitHubCommitRemovesAPathWhoseContentIsNil(t *testing.T) {
 		writeJSON(t, w, map[string]any{refKey: "refs/heads/remove-pool", objectKey: map[string]any{shaKey: headSHA}})
 	})
 	mux.HandleFunc("/api/v3/repos/acme/management-clusters/git/commits/"+headSHA, func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(t, w, map[string]any{shaKey: headSHA, treeKey: map[string]any{shaKey: "tree0"}})
+		writeJSON(t, w, map[string]any{shaKey: headSHA, treeKey: map[string]any{shaKey: headTree}})
 	})
 	blobs := 0
 	mux.HandleFunc("/api/v3/repos/acme/management-clusters/git/blobs", func(w http.ResponseWriter, _ *http.Request) {
@@ -252,12 +252,24 @@ func TestGitHubCommitRemovesAPathWhoseContentIsNil(t *testing.T) {
 	mux.HandleFunc("/api/v3/repos/acme/management-clusters/git/commits", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(t, w, map[string]any{shaKey: "commit1"})
 	})
+	mux.HandleFunc("/api/v3/repos/acme/management-clusters/contents/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("ref") != headSHA {
+			t.Errorf("contents read at %q, want the head %s", r.URL.Query().Get("ref"), headSHA)
+		}
+		if r.URL.Path != "/api/v3/repos/acme/management-clusters/contents/"+poolPath {
+			w.WriteHeader(http.StatusNotFound)
+			writeJSON(t, w, map[string]any{messageKey: "Not Found"})
+			return
+		}
+		writeJSON(t, w, map[string]any{typeKey: fileType, pathKey: poolPath})
+	})
 	mux.HandleFunc("/api/v3/repos/acme/management-clusters/git/refs/heads/remove-pool", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(t, w, map[string]any{refKey: "refs/heads/remove-pool", objectKey: map[string]any{shaKey: "commit1"}})
 	})
 	err := gh.Commit(context.Background(), repoA, "remove-pool", "remove the pool", map[string][]byte{
 		kustomizationPath: []byte("resources: []"),
 		poolPath:          nil,
+		"a/gone.yaml":     nil,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -266,7 +278,7 @@ func TestGitHubCommitRemovesAPathWhoseContentIsNil(t *testing.T) {
 		t.Errorf("blobs created = %d, want 1 (none for the removed path)", blobs)
 	}
 	if len(tree.Tree) != 2 {
-		t.Fatalf("tree entries = %v", tree.Tree)
+		t.Fatalf("tree entries = %v, want the content and the removal of the present path only", tree.Tree)
 	}
 	removed := tree.Tree[1]
 	if removed["path"] != poolPath || removed[shaKey] != nil || removed["content"] != nil {
@@ -285,13 +297,13 @@ func TestGitHubCommitRemovesAPathWhoseContentIsNil(t *testing.T) {
 func TestGitHubCreateBranchBringsAnExistingBranchUpToDate(t *testing.T) {
 	mux, gh := server(t)
 	mux.HandleFunc("/api/v3/repos/acme/management-clusters/git/ref/heads/main", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(t, w, map[string]any{refKey: "refs/heads/main", objectKey: map[string]any{shaKey: "base1"}})
+		writeJSON(t, w, map[string]any{refKey: "refs/heads/main", objectKey: map[string]any{shaKey: baseHead}})
 	})
 	createStatus := http.StatusCreated
 	mux.HandleFunc("/api/v3/repos/acme/management-clusters/git/refs", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(createStatus)
 		if createStatus == http.StatusCreated {
-			writeJSON(t, w, map[string]any{refKey: "refs/heads/feature", objectKey: map[string]any{shaKey: "base1"}})
+			writeJSON(t, w, map[string]any{refKey: "refs/heads/feature", objectKey: map[string]any{shaKey: baseHead}})
 			return
 		}
 		writeJSON(t, w, map[string]any{messageKey: "Reference already exists"})
@@ -306,16 +318,16 @@ func TestGitHubCreateBranchBringsAnExistingBranchUpToDate(t *testing.T) {
 		w.WriteHeader(mergeStatus)
 		switch mergeStatus {
 		case http.StatusCreated:
-			writeJSON(t, w, map[string]any{shaKey: "merge1"})
+			writeJSON(t, w, map[string]any{shaKey: mergeCommit})
 		case http.StatusConflict:
 			writeJSON(t, w, map[string]any{messageKey: "Merge conflict"})
 		}
 	})
 	mux.HandleFunc("/api/v3/repos/acme/management-clusters/pulls", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("head") != "acme:feature" || r.URL.Query().Get("state") != "open" {
+		if r.URL.Query().Get(headKey) != "acme:feature" || r.URL.Query().Get("state") != "open" {
 			t.Errorf("pull request lookup: %s", r.URL.RawQuery)
 		}
-		writeJSON(t, w, []map[string]any{{numberKey: 7, "html_url": "https://github.example/acme/management-clusters/pull/7", "head": map[string]any{refKey: featureBranch, shaKey: "old"}, "base": map[string]any{refKey: mainBranch}}})
+		writeJSON(t, w, []map[string]any{{numberKey: 7, "html_url": "https://github.example/acme/management-clusters/pull/7", headKey: map[string]any{refKey: featureBranch, shaKey: "old"}, baseKey: map[string]any{refKey: mainBranch}}})
 	})
 	ctx := context.Background()
 	if err := gh.CreateBranch(ctx, repoA, featureBranch, mainBranch); err != nil || merges != 0 {
@@ -325,7 +337,7 @@ func TestGitHubCreateBranchBringsAnExistingBranchUpToDate(t *testing.T) {
 	if err := gh.CreateBranch(ctx, repoA, featureBranch, mainBranch); err != nil {
 		t.Fatalf("existing branch behind main: %v", err)
 	}
-	if merges != 1 || merge["base"] != featureBranch || merge["head"] != mainBranch || merge["commit_message"] != "Merge branch 'main' into feature" {
+	if merges != 1 || merge[baseKey] != featureBranch || merge[headKey] != mainBranch || merge["commit_message"] != "Merge branch 'main' into feature" {
 		t.Errorf("merge request after %d merges: %v", merges, merge)
 	}
 	mergeStatus = http.StatusNoContent
@@ -339,13 +351,121 @@ func TestGitHubCreateBranchBringsAnExistingBranchUpToDate(t *testing.T) {
 	}
 }
 
+// TestGitHubRevertOntoAnExistingRevertBranch: the revert branch exists (422
+// on the create), so the pull request's base is merged into it and the
+// inverted files are committed on its head, a fast-forward; the open revert
+// pull request is returned on the new head. A 409 on the merge is
+// ErrStaleBranch naming the branch and the revert pull request, nothing
+// committed.
+func TestGitHubRevertOntoAnExistingRevertBranch(t *testing.T) {
+	const (
+		repoPath = "/api/v3/repos/acme/management-clusters"
+		branch   = "revert-1-feature"
+	)
+	mux, gh := server(t)
+	mux.HandleFunc("GET "+repoPath+"/pulls/1", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, map[string]any{numberKey: 1, "title": "Change", "merged": true, "merge_commit_sha": mergeCommit,
+			headKey: map[string]any{refKey: featureBranch}, baseKey: map[string]any{refKey: mainBranch}})
+	})
+	mux.HandleFunc("GET "+repoPath+"/git/commits/merge1", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, map[string]any{shaKey: mergeCommit, "parents": []map[string]any{{shaKey: "parent1"}}})
+	})
+	mux.HandleFunc("GET "+repoPath+"/compare/parent1...merge1", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, map[string]any{"files": []map[string]any{{"filename": oneFile, "status": "added"}}})
+	})
+	mux.HandleFunc("GET "+repoPath+"/git/ref/heads/main", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, map[string]any{refKey: "refs/heads/main", objectKey: map[string]any{shaKey: baseHead}})
+	})
+	mux.HandleFunc("POST "+repoPath+"/git/refs", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		writeJSON(t, w, map[string]any{messageKey: "Reference already exists"})
+	})
+	mergeStatus := http.StatusCreated
+	var merge map[string]any
+	mux.HandleFunc("POST "+repoPath+"/merges", func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&merge); err != nil {
+			t.Error(err)
+		}
+		w.WriteHeader(mergeStatus)
+		writeJSON(t, w, map[string]any{shaKey: updatedHead})
+	})
+	mux.HandleFunc("GET "+repoPath+"/git/ref/heads/"+branch, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, map[string]any{refKey: "refs/heads/" + branch, objectKey: map[string]any{shaKey: updatedHead}})
+	})
+	mux.HandleFunc("GET "+repoPath+"/contents/"+oneFile, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, map[string]any{typeKey: fileType, pathKey: oneFile})
+	})
+	mux.HandleFunc("GET "+repoPath+"/git/commits/updated1", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, map[string]any{shaKey: updatedHead, treeKey: map[string]any{shaKey: headTree}})
+	})
+	var tree struct {
+		BaseTree string `json:"base_tree"`
+	}
+	mux.HandleFunc("POST "+repoPath+"/git/trees", func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&tree); err != nil {
+			t.Error(err)
+		}
+		writeJSON(t, w, map[string]any{shaKey: treeSHA})
+	})
+	var commit struct {
+		Parents []string `json:"parents"`
+	}
+	mux.HandleFunc("POST "+repoPath+"/git/commits", func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&commit); err != nil {
+			t.Error(err)
+		}
+		writeJSON(t, w, map[string]any{shaKey: revertCommit})
+	})
+	var update map[string]any
+	mux.HandleFunc("PATCH "+repoPath+"/git/refs/heads/"+branch, func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
+			t.Error(err)
+		}
+		writeJSON(t, w, map[string]any{refKey: "refs/heads/" + branch, objectKey: map[string]any{shaKey: revertCommit}})
+	})
+	mux.HandleFunc("POST "+repoPath+"/pulls", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		writeJSON(t, w, map[string]any{messageKey: "A pull request already exists"})
+	})
+	mux.HandleFunc("GET "+repoPath+"/pulls", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get(headKey) != "acme:"+branch {
+			t.Errorf("pull request lookup: %s", r.URL.RawQuery)
+		}
+		writeJSON(t, w, []map[string]any{{numberKey: 2, "html_url": "https://github.example/acme/management-clusters/pull/2",
+			headKey: map[string]any{refKey: branch, shaKey: revertCommit}, baseKey: map[string]any{refKey: mainBranch}}})
+	})
+	ctx := context.Background()
+	pr := PullRequest{Repository: repoA, Number: 1}
+	revert, err := gh.Revert(ctx, pr, "again", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if merge[baseKey] != branch || merge[headKey] != mainBranch {
+		t.Errorf("merge request: %v, want %s merged into %s", merge, mainBranch, branch)
+	}
+	if tree.BaseTree != headTree || len(commit.Parents) != 1 || commit.Parents[0] != updatedHead || update[shaKey] != revertCommit || update["force"] == true {
+		t.Errorf("want the revert committed on the branch head updated1 and fast-forwarded: tree %+v, commit %+v, ref update %v", tree, commit, update)
+	}
+	if revert.Number != 2 || revert.Head != branch || revert.HeadSHA != revertCommit {
+		t.Errorf("revert pull request: %+v", revert)
+	}
+	mergeStatus, update = http.StatusConflict, nil
+	_, err = gh.Revert(ctx, pr, "again", nil)
+	if !errors.Is(err, ErrStaleBranch) || !strings.HasPrefix(err.Error(), OpRevert+": ") || !strings.Contains(err.Error(), "acme/management-clusters@"+branch) || !strings.Contains(err.Error(), "/pull/2") {
+		t.Errorf("conflict: want ErrStaleBranch naming the revert branch and its pull request, got %v", err)
+	}
+	if update != nil {
+		t.Errorf("a refused revert moved the branch: %v", update)
+	}
+}
+
 func TestGitHubReadFileReadsTheBlobAndAnswersNotFound(t *testing.T) {
 	mux, gh := server(t)
 	mux.HandleFunc("/api/v3/repos/acme/management-clusters/contents/a/kustomization.yaml", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get(refKey) != mainBranch {
 			t.Errorf("ref = %q", r.URL.Query().Get(refKey))
 		}
-		writeJSON(t, w, map[string]any{typeKey: "file", shaKey: "blob9", pathKey: kustomizationPath})
+		writeJSON(t, w, map[string]any{typeKey: fileType, shaKey: "blob9", pathKey: kustomizationPath})
 	})
 	mux.HandleFunc("/api/v3/repos/acme/management-clusters/git/blobs/blob9", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("resources: [pool.yaml]"))
@@ -403,8 +523,12 @@ func TestGitHubListFilesRefusesATruncatedTree(t *testing.T) {
 	}
 }
 
-// treeSHA is the SHA of the tree the ListFiles fakes answer with.
-const treeSHA = "tree1"
+// treeSHA is the SHA of the tree the ListFiles fakes answer with, headTree
+// the tree of a branch head the Commit and Revert fakes answer with.
+const (
+	treeSHA  = "tree1"
+	headTree = "tree0"
+)
 
 // pathKey is a tree entry's or content's path in the GitHub API.
 const pathKey = "path"
@@ -416,9 +540,23 @@ const (
 )
 
 // numberKey, messageKey and objectKey are a pull request's number, an error's
-// message and a ref's object in the GitHub API.
+// message and a ref's object in the GitHub API; headKey and baseKey a pull
+// request's or a merge's head and base, fileType a content's type.
 const (
 	numberKey  = "number"
 	messageKey = "message"
 	objectKey  = "object"
+	headKey    = "head"
+	baseKey    = "base"
+	fileType   = "file"
+)
+
+// baseHead, mergeCommit, updatedHead and revertCommit are the SHAs the
+// Revert fakes answer with: the base's head, the merged pull request's merge
+// commit, the revert branch's head after the update, the revert commit.
+const (
+	baseHead     = "base1"
+	mergeCommit  = "merge1"
+	updatedHead  = "updated1"
+	revertCommit = "revert2"
 )
