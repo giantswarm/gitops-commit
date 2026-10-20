@@ -500,7 +500,7 @@ func (g *GitHub) restoredEntry(ctx context.Context, repo Repository, sha, path s
 
 func (g *GitHub) blobEntry(ctx context.Context, op string, repo Repository, path string, content []byte) (*github.TreeEntry, error) {
 	blob, _, err := g.gh.Git.CreateBlob(ctx, repo.Owner, repo.Name, github.Blob{
-		Content:  new(base64.StdEncoding.EncodeToString(content)),
+		Content:  base64.StdEncoding.EncodeToString(content),
 		Encoding: new("base64"),
 	})
 	if err != nil {
