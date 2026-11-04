@@ -12,7 +12,7 @@ The caller supplies the data as typed structs or decoded objects through `Flux.A
 
 The repository's `.sops.yaml` determines which files need encryption. A file matching a creation rule's `path_regex` is encrypted for that rule's age recipients, regardless of its name. For example, a rule can cover every file under `secrets/`. A file whose name contains `secret` or `credential` is refused if no rule covers it, so it cannot be written in plaintext.
 
-Only public recipient keys are needed. The module holds no private key and has no decryption code path; a test enforces this restriction. Secret files that already exist in the repository are left untouched.
+Only public recipient keys are needed. The module holds no private key and has no decryption code path; a test enforces this restriction. By default, secret files that already exist in the repository are left untouched. Callers can explicitly replace them through `layout.ReplaceSecrets`, described below.
 
 #### Generated values
 
@@ -24,7 +24,7 @@ Three kinds are supported:
 - `alphanumeric`: random characters.
 - `keypair-es256`: an ECDSA P-256 key pair. The private key uses PKCS #8 PEM and the public key uses SubjectPublicKeyInfo PEM, both written as single-line YAML scalars. Each declaration selects which half its placeholder receives.
 
-Generated secrets appear only in encrypted output. The public half of a key pair may also appear in plain files; the private half is allowed only in secret files. Existing secret files are never regenerated.
+Generated secrets appear only in encrypted output. The public half of a key pair may also appear in plain files; the private half is allowed only in secret files. Existing secret files are not regenerated unless explicitly replaced.
 
 ### `layout`: plan file and cluster changes
 
@@ -32,9 +32,17 @@ Generated secrets appear only in encrypted output. The public half of a key pair
 
 A `Directory` gives a writer its own directory, such as `cluster-manager` or `model-manager`, under the directory built by a Flux Kustomization. It contains one file per object and a `kustomization.yaml` listing those files. `ObjectFile` places each Secret in its own secret file. When a parent `kustomization.yaml` exists, it lists the writer's directory; the layout also works without a parent file.
 
-`Build` compares the proposed files with the base branch and produces a plan of added, updated, removed and unchanged files. Its `Change` can be passed to `commit.Open`. Repeating a write whose files are already on the base branch produces no changes.
+`Build` compares the proposed files with the base branch and produces a plan of added, updated, removed and unchanged files. Its `Change` can be passed to `commit.Open`. Repeating a write whose files are already on the base branch produces no changes, unless it explicitly replaces a secret file.
 
-New secret files are encrypted for the recipients in `.sops.yaml`. Existing secret files are never re-encrypted. If a secret file cannot be encrypted for the repository, `Build` returns a `SecretError`.
+New secret files are encrypted for the recipients in `.sops.yaml`. Existing secret files are left untouched unless the caller passes `ReplaceSecrets(paths...)` to `Build`:
+
+```go
+layout.Build(ctx, r, dir, write, remove, layout.ReplaceSecrets(path))
+```
+
+Each replacement path must be a secret file included in `write`. Its new value is encrypted for the repository's recipients under the same path, replacing the old content. Replacing an existing secret is always an `Update`, even on repeated runs, because SOPS produces new ciphertext each time. The old content is never decrypted for comparison.
+
+If a new or replacement secret file cannot be encrypted for the repository, `Build` returns a `SecretError`, including the missing creation rule when applicable.
 
 Both the writer's and parent's kustomization files are edited as YAML nodes to preserve comments. The writer's kustomization file and its parent entry are removed with the last file.
 
