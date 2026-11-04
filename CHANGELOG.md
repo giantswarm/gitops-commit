@@ -39,6 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `commit`: the pull-request seams on `Remote` and `Fake` — `FindPullRequest`, `OpenDraftPullRequest`, `EnableAutoMerge` (the caller's choice, with the repository's merge method), `Close` and `Revert` — and `NewGitHubWithClient` for a remote on an HTTP client that already carries the caller's identity.
 - `commit`: `Approve` on `Remote` and `Fake` — an approving review on a pull request as the person, pinned to the head the caller saw; the `Fake` records the approvals and reports the rollup.
 - `sopsenc`: the generated kind `keypair-es256` — an ECDSA P-256 key pair drawn once per name, its halves PEM (PKCS #8 private, SubjectPublicKeyInfo public) written as one-line YAML scalars; a declaration names the half its placeholder receives, the private half in secret files only, the public half in plain files too.
+- `layout`: `Build` replaces an existing secret file when the write names it with the `ReplaceSecrets` option: the new value is encrypted for the repository's `.sops.yaml` recipients under the same path and lands as an `Update` in the pull request, the old content gone. Without the option an existing secret file stays as it is; a replaced path with no creation rule is a `SecretError` naming the missing rule.
 
 
 [Unreleased]: https://github.com/giantswarm/gitops-commit/tree/main

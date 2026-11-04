@@ -12,6 +12,7 @@ import (
 
 	"github.com/giantswarm/gitops-commit/commit"
 	"github.com/giantswarm/gitops-commit/provenance"
+	"github.com/giantswarm/gitops-commit/sopsenc"
 )
 
 // acme owns the fixture repository and is the fixture organization.
@@ -250,5 +251,101 @@ func TestWithResources(t *testing.T) {
 	}
 	if _, err := WithResources([]byte("- a\n"), nil); !errors.Is(err, errNoMapping) {
 		t.Errorf("a list document: err = %v", err)
+	}
+}
+
+// replacedKey is the new, obviously fake value a replacing write carries.
+const replacedKey = "fake-replaced-key-not-a-secret"
+
+// replacingWrite is write() with a new value in the secret file.
+func replacingWrite() map[string][]byte {
+	w := write()
+	w[encFile] = []byte("kind: Secret\nmetadata:\n  name: qwen\nstringData:\n  OPENAI_API_KEY: " + replacedKey + "\n")
+	return w
+}
+
+// landed is the base after a first write of write().
+func landed(t *testing.T, sops []byte) map[string][]byte {
+	t.Helper()
+	base := map[string][]byte{SOPSConfigFile: sops, parentPath: []byte(parentKustomization)}
+	first, err := Build(context.Background(), seed(t, base), dir(), write(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for p, c := range first.Change().Files {
+		base[p] = c
+	}
+	return base
+}
+
+func TestBuildReplaceSecretLandsTheNewEncryptedContent(t *testing.T) {
+	base := landed(t, sopsYAML(t))
+	fake := seed(t, base)
+	plan, err := Build(context.Background(), fake, dir(), replacingWrite(), nil, ReplaceSecrets(encFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := actions(plan), map[string]Action{plainFile: Unchanged, encFile: Update, dirKustomization: Unchanged}; !maps.Equal(got, want) {
+		t.Fatalf("actions = %v, want %v", got, want)
+	}
+	for _, f := range plan.Files {
+		if f.Content != nil && bytes.Contains(f.Content, []byte(replacedKey)) {
+			t.Errorf("%s carries the plaintext in the plan", f.Path)
+		}
+	}
+	// The Fake lands the replacement like any other change.
+	prs, err := commit.Open(context.Background(), fake, commit.Request{Branch: "replace-qwen", Title: "Replace qwen's key"}, []commit.Change{plan.Change()})
+	if err != nil || len(prs) != 1 {
+		t.Fatalf("Open = %v, %v", prs, err)
+	}
+	commits := fake.Commits(repo, "replace-qwen")
+	if len(commits) != 1 {
+		t.Fatalf("commits = %d, want 1", len(commits))
+	}
+	for p, c := range commits[0].Files {
+		if bytes.Contains(c, []byte(replacedKey)) {
+			t.Errorf("%s carries the plaintext in the commit", p)
+		}
+	}
+	got := commits[0].Files[encFile]
+	if !bytes.Contains(got, []byte("sops:")) || bytes.Equal(got, base[encFile]) {
+		t.Errorf("secret file not replaced with new encrypted content:\n%s", got)
+	}
+	if !bytes.Equal(commits[0].Files[plainFile], base[plainFile]) {
+		t.Error("the plain file changed")
+	}
+}
+
+func TestBuildWithoutReplaceLeavesAnExistingSecret(t *testing.T) {
+	base := landed(t, sopsYAML(t))
+	plan, err := Build(context.Background(), seed(t, base), dir(), replacingWrite(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Changed() {
+		t.Fatalf("a write without ReplaceSecrets changes %v", plan.Change().Files)
+	}
+	if got := actions(plan)[encFile]; got != Unchanged {
+		t.Errorf("%s: %s, want unchanged", encFile, got)
+	}
+}
+
+func TestBuildReplaceRefusesASecretWithoutARule(t *testing.T) {
+	base := landed(t, sopsYAML(t))
+	base[SOPSConfigFile] = sopsYAMLFor(t, "other/.*")
+	_, err := Build(context.Background(), seed(t, base), dir(), replacingWrite(), nil, ReplaceSecrets(encFile))
+	var se *SecretError
+	if !errors.As(err, &se) || len(se.Paths) != 1 || se.Paths[0] != encFile {
+		t.Fatalf("err = %v, want a SecretError naming %s", err, encFile)
+	}
+	if !strings.Contains(se.Reason, sopsenc.ErrNoRule.Error()) || strings.Contains(err.Error(), replacedKey) {
+		t.Errorf("reason = %q, want the missing creation rule named and no plaintext", se.Reason)
+	}
+}
+
+func TestBuildReplaceRefusesAPathNotWritten(t *testing.T) {
+	base := landed(t, sopsYAML(t))
+	if _, err := Build(context.Background(), seed(t, base), dir(), map[string][]byte{plainFile: write()[plainFile]}, nil, ReplaceSecrets(encFile)); err == nil {
+		t.Error("a replaced path that is not written accepted")
 	}
 }
