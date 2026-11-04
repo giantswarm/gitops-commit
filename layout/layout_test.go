@@ -9,9 +9,13 @@ import (
 	"testing"
 
 	"filippo.io/age"
+	"github.com/getsops/sops/v3/aes"
+	sopage "github.com/getsops/sops/v3/age"
+	sopsyaml "github.com/getsops/sops/v3/stores/yaml"
 
 	"github.com/giantswarm/gitops-commit/commit"
 	"github.com/giantswarm/gitops-commit/provenance"
+	"github.com/giantswarm/gitops-commit/sopsenc"
 )
 
 // acme owns the fixture repository and is the fixture organization.
@@ -40,11 +44,56 @@ func sopsYAML(t *testing.T) []byte {
 // sopsYAMLFor encrypts the secret files matching pathRegex for a fresh age key.
 func sopsYAMLFor(t *testing.T, pathRegex string) []byte {
 	t.Helper()
+	cfg, _ := sopsYAMLWithIdentity(t, pathRegex)
+	return cfg
+}
+
+// sopsYAMLWithIdentity is sopsYAMLFor with the fresh key's private half, for
+// a test that decrypts what Build encrypted; the module itself never does.
+func sopsYAMLWithIdentity(t *testing.T, pathRegex string) ([]byte, *age.X25519Identity) {
+	t.Helper()
 	id, err := age.GenerateX25519Identity()
 	if err != nil {
 		t.Fatal(err)
 	}
-	return []byte("creation_rules:\n  - age: " + id.Recipient().String() + "\n    path_regex: " + pathRegex + "\n    encrypted_regex: ^(data|stringData)$\n")
+	return []byte("creation_rules:\n  - age: " + id.Recipient().String() + "\n    path_regex: " + pathRegex + "\n    encrypted_regex: ^(data|stringData)$\n"), id
+}
+
+// decrypt is the test's own decryption with the fixture's private key, as
+// sopsenc's tests do; the package under test has none.
+func decrypt(t *testing.T, ciphertext []byte, identity *age.X25519Identity) []byte {
+	t.Helper()
+	store := &sopsyaml.Store{}
+	tree, err := store.LoadEncryptedFile(ciphertext)
+	if err != nil {
+		t.Fatalf("loading encrypted file: %v", err)
+	}
+	var ids sopage.ParsedIdentities
+	if err := ids.Import(identity.String()); err != nil {
+		t.Fatal(err)
+	}
+	var dataKey []byte
+	for _, group := range tree.Metadata.KeyGroups {
+		for _, key := range group {
+			if mk, ok := key.(*sopage.MasterKey); ok {
+				ids.ApplyToMasterKey(mk)
+				if dk, err := mk.Decrypt(); err == nil {
+					dataKey = dk
+				}
+			}
+		}
+	}
+	if dataKey == nil {
+		t.Fatal("fixture key cannot open the data key")
+	}
+	if _, err := tree.Decrypt(dataKey, aes.NewCipher()); err != nil {
+		t.Fatalf("decrypting tree: %v", err)
+	}
+	plain, err := store.EmitPlainFile(tree.Branches)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return plain
 }
 
 func seed(t *testing.T, files map[string][]byte) *commit.Fake {
@@ -250,5 +299,112 @@ func TestWithResources(t *testing.T) {
 	}
 	if _, err := WithResources([]byte("- a\n"), nil); !errors.Is(err, errNoMapping) {
 		t.Errorf("a list document: err = %v", err)
+	}
+}
+
+// replacedKey is the new, obviously fake value a replacing write carries.
+const replacedKey = "fake-replaced-key-not-a-secret"
+
+// replacingWrite is write() with a new value in the secret file.
+func replacingWrite() map[string][]byte {
+	w := write()
+	w[encFile] = []byte("kind: Secret\nmetadata:\n  name: qwen\nstringData:\n  OPENAI_API_KEY: " + replacedKey + "\n")
+	return w
+}
+
+// landed is the base after a first write of write().
+func landed(t *testing.T, sops []byte) map[string][]byte {
+	t.Helper()
+	base := map[string][]byte{SOPSConfigFile: sops, parentPath: []byte(parentKustomization)}
+	first, err := Build(context.Background(), seed(t, base), dir(), write(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for p, c := range first.Change().Files {
+		base[p] = c
+	}
+	return base
+}
+
+func TestBuildReplaceSecretLandsTheNewEncryptedContent(t *testing.T) {
+	cfg, identity := sopsYAMLWithIdentity(t, "clusters/.*(secret|credential|secrets/).*")
+	base := landed(t, cfg)
+	fake := seed(t, base)
+	plan, err := Build(context.Background(), fake, dir(), replacingWrite(), nil, ReplaceSecrets(encFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := actions(plan), map[string]Action{plainFile: Unchanged, encFile: Update, dirKustomization: Unchanged}; !maps.Equal(got, want) {
+		t.Fatalf("actions = %v, want %v", got, want)
+	}
+	for _, f := range plan.Files {
+		if f.Content != nil && bytes.Contains(f.Content, []byte(replacedKey)) {
+			t.Errorf("%s carries the plaintext in the plan", f.Path)
+		}
+	}
+	// The Fake lands the replacement like any other change.
+	prs, err := commit.Open(context.Background(), fake, commit.Request{Branch: "replace-qwen", Title: "Replace qwen's key"}, []commit.Change{plan.Change()})
+	if err != nil || len(prs) != 1 {
+		t.Fatalf("Open = %v, %v", prs, err)
+	}
+	commits := fake.Commits(repo, "replace-qwen")
+	if len(commits) != 1 {
+		t.Fatalf("commits = %d, want 1", len(commits))
+	}
+	for p, c := range commits[0].Files {
+		if bytes.Contains(c, []byte(replacedKey)) {
+			t.Errorf("%s carries the plaintext in the commit", p)
+		}
+	}
+	got := commits[0].Files[encFile]
+	if !bytes.Contains(got, []byte("sops:")) || bytes.Equal(got, base[encFile]) {
+		t.Errorf("secret file not replaced with new encrypted content:\n%s", got)
+	}
+	if plain := decrypt(t, got, identity); !bytes.Contains(plain, []byte("OPENAI_API_KEY: "+replacedKey)) {
+		t.Errorf("the replaced file does not decrypt to the new value:\n%s", plain)
+	}
+	if !bytes.Equal(commits[0].Files[plainFile], base[plainFile]) {
+		t.Error("the plain file changed")
+	}
+}
+
+func TestBuildWithoutReplaceLeavesAnExistingSecret(t *testing.T) {
+	base := landed(t, sopsYAML(t))
+	plan, err := Build(context.Background(), seed(t, base), dir(), replacingWrite(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Changed() {
+		t.Fatalf("a write without ReplaceSecrets changes %v", plan.Change().Files)
+	}
+	if got := actions(plan)[encFile]; got != Unchanged {
+		t.Errorf("%s: %s, want unchanged", encFile, got)
+	}
+}
+
+func TestBuildReplaceRefusesASecretWithoutARule(t *testing.T) {
+	base := landed(t, sopsYAML(t))
+	base[SOPSConfigFile] = sopsYAMLFor(t, "other/.*")
+	_, err := Build(context.Background(), seed(t, base), dir(), replacingWrite(), nil, ReplaceSecrets(encFile))
+	var se *SecretError
+	if !errors.As(err, &se) || len(se.Paths) != 1 || se.Paths[0] != encFile {
+		t.Fatalf("err = %v, want a SecretError naming %s", err, encFile)
+	}
+	if !strings.Contains(se.Reason, sopsenc.ErrNoRule.Error()) || strings.Contains(err.Error(), replacedKey) {
+		t.Errorf("reason = %q, want the missing creation rule named and no plaintext", se.Reason)
+	}
+}
+
+func TestBuildReplaceRefusesAPathNotWritten(t *testing.T) {
+	base := landed(t, sopsYAML(t))
+	if _, err := Build(context.Background(), seed(t, base), dir(), map[string][]byte{plainFile: write()[plainFile]}, nil, ReplaceSecrets(encFile)); err == nil {
+		t.Error("a replaced path that is not written accepted")
+	}
+}
+
+func TestBuildReplaceRefusesAPlainFile(t *testing.T) {
+	base := landed(t, sopsYAML(t))
+	if _, err := Build(context.Background(), seed(t, base), dir(), replacingWrite(), nil, ReplaceSecrets(plainFile)); err == nil {
+		t.Error("a replaced path that is not a secret file accepted")
 	}
 }

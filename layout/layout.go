@@ -9,7 +9,8 @@
 //
 // Build decides a write against the base branch — which files are added,
 // updated, removed or already there — encrypts new secret files for the
-// repository's .sops.yaml recipients and never re-encrypts one that exists.
+// repository's .sops.yaml recipients and never re-encrypts one that exists,
+// unless the caller asks for it by path (ReplaceSecrets).
 // The plan's Change is what commit.Open lands as the person.
 package layout
 
@@ -122,20 +123,50 @@ func (e *SecretError) Error() string {
 	return fmt.Sprintf("%s: %s", strings.Join(e.Paths, ", "), e.Reason)
 }
 
+// Option changes how Build decides a write.
+type Option func(*options)
+
+type options struct {
+	replace map[string]bool
+}
+
+// ReplaceSecrets makes Build replace the named secret files where the base
+// carries them: the written content is encrypted for the recipients of the
+// repository's .sops.yaml under the same path and lands as an Update, the old
+// encrypted content gone. Without it an existing secret file is left as it is.
+// Every path must be one of the written files and a secret file. A replaced
+// file is always an Update: its old content is never decrypted to compare.
+func ReplaceSecrets(paths ...string) Option {
+	return func(o *options) {
+		for _, p := range paths {
+			o.replace[p] = true
+		}
+	}
+}
+
 // Build decides a write in dir against the base branch: write are the files
 // to land by path, remove the paths to take away (a path the base does not
 // carry is no change); every path lies inside the directory. A plain file is
 // added, updated or unchanged; a new secret file is encrypted for the
 // recipients of the repository's .sops.yaml, one that exists is left as it
-// is. The directory's kustomization.yaml lists every file it keeps and is
-// removed with the last one; the parent's kustomization.yaml, where there
-// is one, lists the directory while it has files. Both are edited on their
+// is unless ReplaceSecrets names it. The directory's kustomization.yaml
+// lists every file it keeps and is removed with the last one; the parent's
+// kustomization.yaml, where there is one, lists the directory while it has
+// files. Both are edited on their
 // YAML nodes: comments and every other key stay. Read errors from r are
 // returned as they are (commit.AuthError included).
-func Build(ctx context.Context, r commit.Reader, dir Directory, write map[string][]byte, remove []string) (*Plan, error) {
+func Build(ctx context.Context, r commit.Reader, dir Directory, write map[string][]byte, remove []string, opts ...Option) (*Plan, error) {
 	b, err := newBuilder(ctx, r, dir, write, remove)
 	if err != nil {
 		return nil, err
+	}
+	for _, opt := range opts {
+		opt(&b.opts)
+	}
+	for p := range b.opts.replace {
+		if _, ok := write[p]; !ok {
+			return nil, fmt.Errorf("layout: %s is replaced but not written", p)
+		}
 	}
 	emptied, err := b.directory(write, remove)
 	if err != nil {
@@ -157,7 +188,7 @@ func newBuilder(ctx context.Context, r commit.Reader, dir Directory, write map[s
 			return nil, fmt.Errorf("layout: %s is not an object file of %s", p, dir.Path())
 		}
 	}
-	return &builder{ctx: ctx, r: r, dir: dir, base: map[string][]byte{}, plan: &Plan{Directory: dir, changes: map[string][]byte{}}}, nil
+	return &builder{ctx: ctx, r: r, dir: dir, base: map[string][]byte{}, plan: &Plan{Directory: dir, changes: map[string][]byte{}}, opts: options{replace: map[string]bool{}}}, nil
 }
 
 type builder struct {
@@ -166,6 +197,7 @@ type builder struct {
 	dir  Directory
 	base map[string][]byte
 	plan *Plan
+	opts options
 }
 
 // directory decides the object files and the directory's own
@@ -218,6 +250,9 @@ func (b *builder) objects(write map[string][]byte, remove []string) error {
 	}
 	var secrets []sopsenc.File
 	for _, p := range slices.Sorted(maps.Keys(write)) {
+		if b.opts.replace[p] && !isSecret(p) {
+			return fmt.Errorf("layout: %s is replaced but not a secret file", p)
+		}
 		old, err := b.read(p)
 		if err != nil {
 			return err
@@ -225,7 +260,7 @@ func (b *builder) objects(write map[string][]byte, remove []string) error {
 		switch {
 		case !isSecret(p):
 			b.put(p, old, write[p])
-		case old != nil:
+		case old != nil && !b.opts.replace[p]:
 			b.plan.Files = append(b.plan.Files, File{Path: p, Action: Unchanged})
 		default:
 			secrets = append(secrets, sopsenc.File{Path: p, Content: write[p]})
@@ -252,8 +287,9 @@ func (b *builder) objects(write map[string][]byte, remove []string) error {
 	return nil
 }
 
-// encrypt adds the new secret files, encrypted for the recipients the
-// repository's .sops.yaml names for their paths.
+// encrypt adds the new secret files and replaces the existing ones the
+// caller named, encrypted for the recipients the repository's .sops.yaml
+// names for their paths.
 func (b *builder) encrypt(cfg []byte, enc *sopsenc.Encryptor, encErr error, secrets []sopsenc.File) error {
 	paths := make([]string, len(secrets))
 	for i, f := range secrets {
@@ -270,8 +306,12 @@ func (b *builder) encrypt(cfg []byte, enc *sopsenc.Encryptor, encErr error, secr
 		return &SecretError{Paths: paths, Reason: fmt.Sprintf("its %s does not cover them (%v)", SOPSConfigFile, err)}
 	}
 	for _, f := range secrets {
+		action := Add
+		if b.base[f.Path] != nil {
+			action = Update
+		}
 		b.plan.changes[f.Path] = out[f.Path]
-		b.plan.Files = append(b.plan.Files, File{Path: f.Path, Action: Add})
+		b.plan.Files = append(b.plan.Files, File{Path: f.Path, Action: action})
 	}
 	return nil
 }
