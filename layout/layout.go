@@ -149,9 +149,10 @@ func ReplaceSecrets(paths ...string) Option {
 // carry is no change); every path lies inside the directory. A plain file is
 // added, updated or unchanged; a new secret file is encrypted for the
 // recipients of the repository's .sops.yaml, one that exists is left as it
-// is unless ReplaceSecrets names it. The directory's kustomization.yaml lists every file it keeps and is
-// removed with the last one; the parent's kustomization.yaml, where there
-// is one, lists the directory while it has files. Both are edited on their
+// is unless ReplaceSecrets names it. The directory's kustomization.yaml
+// lists every file it keeps and is removed with the last one; the parent's
+// kustomization.yaml, where there is one, lists the directory while it has
+// files. Both are edited on their
 // YAML nodes: comments and every other key stay. Read errors from r are
 // returned as they are (commit.AuthError included).
 func Build(ctx context.Context, r commit.Reader, dir Directory, write map[string][]byte, remove []string, opts ...Option) (*Plan, error) {
