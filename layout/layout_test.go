@@ -9,6 +9,9 @@ import (
 	"testing"
 
 	"filippo.io/age"
+	"github.com/getsops/sops/v3/aes"
+	sopage "github.com/getsops/sops/v3/age"
+	sopsyaml "github.com/getsops/sops/v3/stores/yaml"
 
 	"github.com/giantswarm/gitops-commit/commit"
 	"github.com/giantswarm/gitops-commit/provenance"
@@ -41,11 +44,56 @@ func sopsYAML(t *testing.T) []byte {
 // sopsYAMLFor encrypts the secret files matching pathRegex for a fresh age key.
 func sopsYAMLFor(t *testing.T, pathRegex string) []byte {
 	t.Helper()
+	cfg, _ := sopsYAMLWithIdentity(t, pathRegex)
+	return cfg
+}
+
+// sopsYAMLWithIdentity is sopsYAMLFor with the fresh key's private half, for
+// a test that decrypts what Build encrypted; the module itself never does.
+func sopsYAMLWithIdentity(t *testing.T, pathRegex string) ([]byte, *age.X25519Identity) {
+	t.Helper()
 	id, err := age.GenerateX25519Identity()
 	if err != nil {
 		t.Fatal(err)
 	}
-	return []byte("creation_rules:\n  - age: " + id.Recipient().String() + "\n    path_regex: " + pathRegex + "\n    encrypted_regex: ^(data|stringData)$\n")
+	return []byte("creation_rules:\n  - age: " + id.Recipient().String() + "\n    path_regex: " + pathRegex + "\n    encrypted_regex: ^(data|stringData)$\n"), id
+}
+
+// decrypt is the test's own decryption with the fixture's private key, as
+// sopsenc's tests do; the package under test has none.
+func decrypt(t *testing.T, ciphertext []byte, identity *age.X25519Identity) []byte {
+	t.Helper()
+	store := &sopsyaml.Store{}
+	tree, err := store.LoadEncryptedFile(ciphertext)
+	if err != nil {
+		t.Fatalf("loading encrypted file: %v", err)
+	}
+	var ids sopage.ParsedIdentities
+	if err := ids.Import(identity.String()); err != nil {
+		t.Fatal(err)
+	}
+	var dataKey []byte
+	for _, group := range tree.Metadata.KeyGroups {
+		for _, key := range group {
+			if mk, ok := key.(*sopage.MasterKey); ok {
+				ids.ApplyToMasterKey(mk)
+				if dk, err := mk.Decrypt(); err == nil {
+					dataKey = dk
+				}
+			}
+		}
+	}
+	if dataKey == nil {
+		t.Fatal("fixture key cannot open the data key")
+	}
+	if _, err := tree.Decrypt(dataKey, aes.NewCipher()); err != nil {
+		t.Fatalf("decrypting tree: %v", err)
+	}
+	plain, err := store.EmitPlainFile(tree.Branches)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return plain
 }
 
 func seed(t *testing.T, files map[string][]byte) *commit.Fake {
@@ -279,7 +327,8 @@ func landed(t *testing.T, sops []byte) map[string][]byte {
 }
 
 func TestBuildReplaceSecretLandsTheNewEncryptedContent(t *testing.T) {
-	base := landed(t, sopsYAML(t))
+	cfg, identity := sopsYAMLWithIdentity(t, "clusters/.*(secret|credential|secrets/).*")
+	base := landed(t, cfg)
 	fake := seed(t, base)
 	plan, err := Build(context.Background(), fake, dir(), replacingWrite(), nil, ReplaceSecrets(encFile))
 	if err != nil {
@@ -310,6 +359,9 @@ func TestBuildReplaceSecretLandsTheNewEncryptedContent(t *testing.T) {
 	got := commits[0].Files[encFile]
 	if !bytes.Contains(got, []byte("sops:")) || bytes.Equal(got, base[encFile]) {
 		t.Errorf("secret file not replaced with new encrypted content:\n%s", got)
+	}
+	if plain := decrypt(t, got, identity); !bytes.Contains(plain, []byte("OPENAI_API_KEY: "+replacedKey)) {
+		t.Errorf("the replaced file does not decrypt to the new value:\n%s", plain)
 	}
 	if !bytes.Equal(commits[0].Files[plainFile], base[plainFile]) {
 		t.Error("the plain file changed")
