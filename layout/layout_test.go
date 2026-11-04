@@ -349,3 +349,10 @@ func TestBuildReplaceRefusesAPathNotWritten(t *testing.T) {
 		t.Error("a replaced path that is not written accepted")
 	}
 }
+
+func TestBuildReplaceRefusesAPlainFile(t *testing.T) {
+	base := landed(t, sopsYAML(t))
+	if _, err := Build(context.Background(), seed(t, base), dir(), replacingWrite(), nil, ReplaceSecrets(plainFile)); err == nil {
+		t.Error("a replaced path that is not a secret file accepted")
+	}
+}

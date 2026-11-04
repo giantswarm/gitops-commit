@@ -134,8 +134,8 @@ type options struct {
 // carries them: the written content is encrypted for the recipients of the
 // repository's .sops.yaml under the same path and lands as an Update, the old
 // encrypted content gone. Without it an existing secret file is left as it is.
-// Every path must be one of the written files. A replaced file is always an
-// Update: its old content is never decrypted to compare.
+// Every path must be one of the written files and a secret file. A replaced
+// file is always an Update: its old content is never decrypted to compare.
 func ReplaceSecrets(paths ...string) Option {
 	return func(o *options) {
 		for _, p := range paths {
@@ -250,6 +250,9 @@ func (b *builder) objects(write map[string][]byte, remove []string) error {
 	}
 	var secrets []sopsenc.File
 	for _, p := range slices.Sorted(maps.Keys(write)) {
+		if b.opts.replace[p] && !isSecret(p) {
+			return fmt.Errorf("layout: %s is replaced but not a secret file", p)
+		}
 		old, err := b.read(p)
 		if err != nil {
 			return err
