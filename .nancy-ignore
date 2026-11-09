@@ -2,3 +2,7 @@
 # No newer grpc release exists. Tracked in https://github.com/giantswarm/gitops-commit/issues/17; remove by 2026-10-29.
 CVE-2026-84445 until=2026-10-29 # google.golang.org/grpc@v1.84.0
 CVE-2026-63209 until=2026-10-30 # github.com/klauspost/compress@v1.16.7
+# CVE-2026-107325 (GHSA-frr6-8pf7-f9r2): sops/v3 v3.13.3 -> huaweicloud-sdk-go-v3 v0.1.207 -> mongo-driver v1.17.10.
+# The fix is on the v2 module path only (>= v2.9.2); no fixed v1 release exists.
+# Tracked in https://github.com/giantswarm/gitops-commit/issues/38; remove when upstream fixes the chain, or by 2026-12-07.
+CVE-2026-107325 until=2026-12-07 # go.mongodb.org/mongo-driver@v1.17.10
