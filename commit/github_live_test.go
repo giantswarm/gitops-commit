@@ -161,6 +161,9 @@ func TestLiveRevertOntoAnExistingRevertBranch(t *testing.T) {
 	if err := gh.Merge(ctx, merged); err != nil {
 		t.Fatal(err)
 	}
+	if files, err := gh.MergedFiles(ctx, merged); err != nil || len(files) != 1 || files[0] != (FileChange{Path: file, Kind: FileAdded}) {
+		t.Errorf("MergedFiles = %+v, %v; want %s added", files, err, file)
+	}
 	if revert, err = gh.Revert(ctx, merged, "the first revert", nil); err != nil {
 		t.Fatal(err)
 	}

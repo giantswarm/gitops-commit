@@ -447,20 +447,10 @@ func (f *Fake) Revert(_ context.Context, pr PullRequest, body string, overrides 
 		return PullRequest{}, fmt.Errorf("%s: %s has no pull request %d", OpRevert, pr.Repository, pr.Number)
 	}
 	if !p.Merged {
-		return PullRequest{}, ErrNotMerged
+		return PullRequest{}, errRevertNotMerged
 	}
-	before, after := f.commits[p.mergeBase].Files, f.commits[p.HeadSHA].Files
-	changed := map[string]bool{}
-	for path, content := range after {
-		if was, ok := before[path]; !ok || string(was) != string(content) {
-			changed[path] = true
-		}
-	}
-	for path := range before {
-		if _, kept := after[path]; !kept {
-			changed[path] = true
-		}
-	}
+	before := f.commits[p.mergeBase].Files
+	changed := f.changedPaths(p)
 	if len(changed) == 0 {
 		return PullRequest{}, ErrNothingToRevert
 	}
@@ -483,6 +473,81 @@ func (f *Fake) Revert(_ context.Context, pr PullRequest, body string, overrides 
 		return PullRequest{}, err
 	}
 	return f.openLocked(p.Repository, branch, p.Base, revertTitle(p.Title), body, false)
+}
+
+// changedPaths are the paths the merge of p changed on its base: the tree at
+// the merged head against the base's head at the merge. The caller holds the
+// lock.
+func (f *Fake) changedPaths(p *FakePullRequest) map[string]bool {
+	before, after := f.commits[p.mergeBase].Files, f.commits[p.HeadSHA].Files
+	changed := map[string]bool{}
+	for path, content := range after {
+		if was, ok := before[path]; !ok || !bytes.Equal(was, content) {
+			changed[path] = true
+		}
+	}
+	for path := range before {
+		if _, kept := after[path]; !kept {
+			changed[path] = true
+		}
+	}
+	return changed
+}
+
+// MergedFiles implements MergedFilesLister: the paths the merge changed on
+// its base, sorted. A removed path whose exact content an added path carries
+// is reported as that path's rename, the way GitHub's rename detection reports
+// an unchanged move; removed and added paths pair in path order.
+func (f *Fake) MergedFiles(_ context.Context, pr PullRequest) ([]FileChange, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.Fail[OpMergedFiles]; err != nil {
+		return nil, err
+	}
+	p := f.find(pr)
+	if p == nil {
+		return nil, fmt.Errorf("%s: %s has no pull request %d", OpMergedFiles, pr.Repository, pr.Number)
+	}
+	if !p.Merged {
+		return nil, fmt.Errorf("%s %s#%d: %w", OpMergedFiles, pr.Repository, pr.Number, ErrNotMerged)
+	}
+	before, after := f.commits[p.mergeBase].Files, f.commits[p.HeadSHA].Files
+	var added, removed []string
+	changes := map[string]FileChange{}
+	for _, path := range slices.Sorted(maps.Keys(f.changedPaths(p))) {
+		_, was := before[path]
+		_, is := after[path]
+		switch {
+		case !was:
+			added = append(added, path)
+		case !is:
+			removed = append(removed, path)
+		default:
+			changes[path] = FileChange{Path: path, Kind: FileModified}
+		}
+	}
+	renamed := map[string]bool{}
+	for _, old := range removed {
+		i := slices.IndexFunc(added, func(path string) bool {
+			return !renamed[path] && bytes.Equal(before[old], after[path])
+		})
+		if i < 0 {
+			changes[old] = FileChange{Path: old, Kind: FileRemoved}
+			continue
+		}
+		renamed[added[i]] = true
+		changes[added[i]] = FileChange{Path: added[i], Kind: FileRenamed, PreviousPath: old}
+	}
+	for _, path := range added {
+		if !renamed[path] {
+			changes[path] = FileChange{Path: path, Kind: FileAdded}
+		}
+	}
+	out := make([]FileChange, 0, len(changes))
+	for _, path := range slices.Sorted(maps.Keys(changes)) {
+		out = append(out, changes[path])
+	}
+	return out, nil
 }
 
 // Status implements Remote.

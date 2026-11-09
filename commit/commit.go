@@ -141,6 +141,38 @@ type Lister interface {
 	ListFiles(ctx context.Context, repo Repository, branch, dir string) ([]string, error)
 }
 
+// ChangeKind is what a merged pull request did to one file.
+type ChangeKind string
+
+const (
+	FileAdded    ChangeKind = "added"
+	FileModified ChangeKind = "modified"
+	FileRemoved  ChangeKind = "removed"
+	// FileRenamed: the file moved from FileChange.PreviousPath to
+	// FileChange.Path, its content changed or not. The previous path is gone
+	// from the base after the merge although no FileRemoved names it.
+	FileRenamed ChangeKind = "renamed"
+)
+
+// FileChange is one file a merged pull request changed: its repository-relative
+// path, the kind of change and, for FileRenamed only, the path it had before.
+type FileChange struct {
+	Path         string
+	Kind         ChangeKind
+	PreviousPath string
+}
+
+// MergedFilesLister lists what a merged pull request changed: what a caller
+// checks before it acts on a merge — that this merge, and not another one,
+// removed a given file. GitHub and Fake implement it.
+type MergedFilesLister interface {
+	// MergedFiles returns the files the merged pull request added, modified,
+	// removed or renamed, sorted by path; ErrNotMerged when the pull request
+	// is open or closed without a merge. Only pr.Repository and pr.Number are
+	// read.
+	MergedFiles(ctx context.Context, pr PullRequest) ([]FileChange, error)
+}
+
 // Operation names of the remote calls, carried by AuthError and by Fake.Fail.
 const (
 	OpCreateBranch    = "create branch"
@@ -155,6 +187,7 @@ const (
 	OpRevert          = "revert pull request"
 	OpReadFile        = "read file"
 	OpListFiles       = "list files"
+	OpMergedFiles     = "list merged files"
 )
 
 var (
@@ -180,8 +213,9 @@ var (
 	ErrChecksFailed = errors.New("merge refused: checks failed")
 	// ErrHeadMoved: the head is no longer the commit the caller saw.
 	ErrHeadMoved = errors.New("merge refused: the head moved since the pull request was seen")
-	// ErrNotMerged: only a merged pull request can be reverted.
-	ErrNotMerged = errors.New("revert refused: the pull request is not merged")
+	// ErrNotMerged: the pull request is not merged; only a merged pull request
+	// can be reverted or have its merged files listed.
+	ErrNotMerged = errors.New("the pull request is not merged")
 	// ErrNothingToRevert: the merged pull request changed no files.
 	ErrNothingToRevert = errors.New("revert refused: the pull request changed no files")
 	// ErrFileNotFound: the branch carries no file at the path.
@@ -211,6 +245,9 @@ func revertTitle(title string) string    { return fmt.Sprintf("revert: Revert %q
 func revertMessage(pr PullRequest, title, body string) string {
 	return fmt.Sprintf("Revert %q (#%d)\n\n%s", title, pr.Number, body)
 }
+
+// errRevertNotMerged is Revert's refusal of a pull request that is not merged.
+var errRevertNotMerged = fmt.Errorf("revert refused: %w", ErrNotMerged)
 
 // AuthError is ErrAuth with the status the remote answered and the operation
 // it refused. errors.Is(err, ErrAuth) matches it.
