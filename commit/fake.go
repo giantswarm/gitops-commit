@@ -450,7 +450,7 @@ func (f *Fake) Revert(_ context.Context, pr PullRequest, body string, overrides 
 		return PullRequest{}, errRevertNotMerged
 	}
 	before := f.commits[p.mergeBase].Files
-	changed := f.changedPaths(p)
+	changed := changedPaths(before, f.commits[p.HeadSHA].Files)
 	if len(changed) == 0 {
 		return PullRequest{}, ErrNothingToRevert
 	}
@@ -475,11 +475,9 @@ func (f *Fake) Revert(_ context.Context, pr PullRequest, body string, overrides 
 	return f.openLocked(p.Repository, branch, p.Base, revertTitle(p.Title), body, false)
 }
 
-// changedPaths are the paths the merge of p changed on its base: the tree at
-// the merged head against the base's head at the merge. The caller holds the
-// lock.
-func (f *Fake) changedPaths(p *FakePullRequest) map[string]bool {
-	before, after := f.commits[p.mergeBase].Files, f.commits[p.HeadSHA].Files
+// changedPaths are the paths whose entry differs between the trees before
+// and after.
+func changedPaths(before, after map[string][]byte) map[string]bool {
 	changed := map[string]bool{}
 	for path, content := range after {
 		if was, ok := before[path]; !ok || !bytes.Equal(was, content) {
@@ -494,10 +492,14 @@ func (f *Fake) changedPaths(p *FakePullRequest) map[string]bool {
 	return changed
 }
 
-// MergedFiles implements MergedFilesLister: the paths the merge changed on
-// its base, sorted. A removed path whose exact content an added path carries
-// is reported as that path's rename, the way GitHub's rename detection reports
-// an unchanged move; removed and added paths pair in path order.
+// MergedFiles implements MergedFilesLister the way GitHub's pull request
+// files endpoint answers: the merged head's tree against the tree at the
+// merge base of the head and the base as it was at the merge, so another
+// pull request merged into the base after this branch was cut is not listed.
+// Results are sorted by path. A removed path whose exact, non-empty content
+// an added path carries is reported as that path's rename; removed and added
+// paths pair in path order. GitHub also detects a rename whose content
+// changed, which the Fake reports as a removal and an addition.
 func (f *Fake) MergedFiles(_ context.Context, pr PullRequest) ([]FileChange, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -511,10 +513,11 @@ func (f *Fake) MergedFiles(_ context.Context, pr PullRequest) ([]FileChange, err
 	if !p.Merged {
 		return nil, fmt.Errorf("%s %s#%d: %w", OpMergedFiles, pr.Repository, pr.Number, ErrNotMerged)
 	}
-	before, after := f.commits[p.mergeBase].Files, f.commits[p.HeadSHA].Files
+	before := f.commits[f.mergeBase(p.HeadSHA, p.mergeBase)].Files
+	after := f.commits[p.HeadSHA].Files
 	var added, removed []string
 	changes := map[string]FileChange{}
-	for _, path := range slices.Sorted(maps.Keys(f.changedPaths(p))) {
+	for _, path := range slices.Sorted(maps.Keys(changedPaths(before, after))) {
 		_, was := before[path]
 		_, is := after[path]
 		switch {
@@ -529,7 +532,7 @@ func (f *Fake) MergedFiles(_ context.Context, pr PullRequest) ([]FileChange, err
 	renamed := map[string]bool{}
 	for _, old := range removed {
 		i := slices.IndexFunc(added, func(path string) bool {
-			return !renamed[path] && bytes.Equal(before[old], after[path])
+			return !renamed[path] && len(after[path]) > 0 && bytes.Equal(before[old], after[path])
 		})
 		if i < 0 {
 			changes[old] = FileChange{Path: old, Kind: FileRemoved}

@@ -161,6 +161,8 @@ func TestLiveRevertOntoAnExistingRevertBranch(t *testing.T) {
 	if err := gh.Merge(ctx, merged); err != nil {
 		t.Fatal(err)
 	}
+	// The merged scratch pull request also checks MergedFiles against the
+	// real endpoint and its status strings, without a second merge.
 	if files, err := gh.MergedFiles(ctx, merged); err != nil || len(files) != 1 || files[0] != (FileChange{Path: file, Kind: FileAdded}) {
 		t.Errorf("MergedFiles = %+v, %v; want %s added", files, err, file)
 	}

@@ -68,7 +68,7 @@ Create a `Remote` with `NewGitHub` using the caller's token, or with `NewGitHubW
 
 `ReadFile`, available through the `Reader` interface on `GitHub` and `Fake`, reads a file at a branch's head. Callers use it to read files such as `kustomization.yaml` and `.sops.yaml`. A missing file returns `ErrFileNotFound`. `ListFiles`, available through the `Lister` interface, lists every file under a directory for operations such as removing a whole directory.
 
-`MergedFiles`, available through the `MergedFilesLister` interface on `GitHub` and `Fake`, lists the files a merged pull request added, modified, removed or renamed, with the previous path of a renamed file. A caller uses it to confirm that a specific merge removed a file, not only that the file is gone from the base. A pull request that is not merged returns `ErrNotMerged`. On GitHub, a listing that cannot hold every changed file, beyond GitHub's limit of 3000, returns an error instead of a partial list.
+`MergedFiles`, available through the `MergedFilesLister` interface on `GitHub` and `Fake`, lists the files a merged pull request added, modified, removed or renamed, with the previous path of a renamed file. A caller uses it to confirm that a specific merge removed a file, not only that the file is gone from the base. `Removes` reports whether a listing removes a path, either by deleting it or by renaming it. `Fake` reports a moved file as a rename only when its content did not change. A pull request that is not merged returns `ErrNotMerged`. On GitHub, a listing that cannot hold every changed file, beyond GitHub's limit of 3000, returns an error instead of a partial list.
 
 #### Open a pull request
 

@@ -149,8 +149,9 @@ const (
 	FileModified ChangeKind = "modified"
 	FileRemoved  ChangeKind = "removed"
 	// FileRenamed: the file moved from FileChange.PreviousPath to
-	// FileChange.Path, its content changed or not. The previous path is gone
-	// from the base after the merge although no FileRemoved names it.
+	// FileChange.Path; on GitHub its content may have changed too. The
+	// previous path is gone from the base after the merge although no
+	// FileRemoved names it: Removes counts it.
 	FileRenamed ChangeKind = "renamed"
 )
 
@@ -160,6 +161,14 @@ type FileChange struct {
 	Path         string
 	Kind         ChangeKind
 	PreviousPath string
+}
+
+// Removes reports whether changes take path away: a removal of path, or a
+// rename from it.
+func Removes(changes []FileChange, path string) bool {
+	return slices.ContainsFunc(changes, func(c FileChange) bool {
+		return (c.Kind == FileRemoved && c.Path == path) || (c.Kind == FileRenamed && c.PreviousPath == path)
+	})
 }
 
 // MergedFilesLister lists what a merged pull request changed: what a caller

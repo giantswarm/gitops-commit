@@ -425,13 +425,6 @@ func TestFakeReadFileAtTheBranchHead(t *testing.T) {
 	}
 }
 
-// removes reports whether the listing names path as removed by the merge.
-func removes(changes []FileChange, path string) bool {
-	return slices.ContainsFunc(changes, func(c FileChange) bool {
-		return c.Kind == FileRemoved && c.Path == path
-	})
-}
-
 func TestMergedFilesTellsTheMergeThatRemovedAFileFromOneThatDidNot(t *testing.T) {
 	const orgFile = "organizations/acme.yaml"
 	f := NewFake()
@@ -456,14 +449,14 @@ func TestMergedFilesTellsTheMergeThatRemovedAFileFromOneThatDidNot(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !removes(got, orgFile) {
+	if !Removes(got, orgFile) {
 		t.Errorf("the deletion's listing does not remove %s: %+v", orgFile, got)
 	}
 	got, err = lister.MergedFiles(ctx, other)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if removes(got, orgFile) {
+	if Removes(got, orgFile) {
 		t.Errorf("the other merge's listing removes %s: %+v", orgFile, got)
 	}
 	if want := []FileChange{{Path: readme, Kind: FileModified}}; !slices.Equal(got, want) {
@@ -531,3 +524,55 @@ func TestMergedFilesRefusesAPullRequestThatIsNotMerged(t *testing.T) {
 
 // movedFile is the path the rename in TestMergedFilesNamesEveryKindSortedByPath moves.
 const movedFile = "moved.go"
+
+func TestMergedFilesListsOnlyItsOwnChangeAfterAnotherMerge(t *testing.T) {
+	const orgA, orgB = "organizations/a.yaml", "organizations/b.yaml"
+	f := NewFake()
+	f.AddBranch(repoA, mainBranch, map[string][]byte{orgA: []byte("a"), orgB: []byte("b")})
+	ctx := context.Background()
+	// Both branches are cut from the same base; a merges first.
+	a := opened(t, f, "delete-a", map[string][]byte{orgA: nil})
+	b := opened(t, f, "delete-b", map[string][]byte{orgB: nil})
+	for _, pr := range []PullRequest{a, b} {
+		if err := Merge(ctx, f, pr, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := f.MergedFiles(ctx, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []FileChange{{Path: orgB, Kind: FileRemoved}}; !slices.Equal(got, want) {
+		t.Errorf("MergedFiles(b) = %+v, want %+v", got, want)
+	}
+}
+
+func TestRemovesCountsARenameFromThePath(t *testing.T) {
+	changes := []FileChange{
+		{Path: "z/" + movedFile, Kind: FileRenamed, PreviousPath: movedFile},
+		{Path: oldFile, Kind: FileRemoved},
+		{Path: readme, Kind: FileModified},
+	}
+	for path, want := range map[string]bool{movedFile: true, oldFile: true, "z/" + movedFile: false, readme: false} {
+		if got := Removes(changes, path); got != want {
+			t.Errorf("Removes(%s) = %v, want %v", path, got, want)
+		}
+	}
+}
+
+func TestMergedFilesPairsNoEmptyFileAsARename(t *testing.T) {
+	f := NewFake()
+	f.AddBranch(repoA, mainBranch, map[string][]byte{oldFile: {}})
+	ctx := context.Background()
+	pr := opened(t, f, featureBranch, map[string][]byte{oldFile: nil, oneFile: {}})
+	if err := Merge(ctx, f, pr, true); err != nil {
+		t.Fatal(err)
+	}
+	got, err := f.MergedFiles(ctx, pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []FileChange{{Path: oneFile, Kind: FileAdded}, {Path: oldFile, Kind: FileRemoved}}; !slices.Equal(got, want) {
+		t.Errorf("MergedFiles = %+v, want %+v", got, want)
+	}
+}

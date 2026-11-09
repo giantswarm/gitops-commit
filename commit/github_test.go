@@ -528,8 +528,8 @@ func TestGitHubListFilesRefusesATruncatedTree(t *testing.T) {
 	}
 }
 
-// mergedPullRequest serves pull request 7 as merged (or not) with changed
-// changed files, and its files endpoint as pages, linked by rel="next".
+// mergedPullRequest serves pull request 7 as merged (or not) with changed as
+// its changed-file count, and its files endpoint as pages linked by rel="next".
 func mergedPullRequest(t *testing.T, merged bool, changed int, pages ...[]map[string]any) *GitHub {
 	t.Helper()
 	mux, gh := server(t)

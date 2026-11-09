@@ -587,14 +587,14 @@ func (g *GitHub) MergedFiles(ctx context.Context, pr PullRequest) ([]FileChange,
 		opts.Page = resp.NextPage
 	}
 	if listed < got.GetChangedFiles() {
-		return nil, fmt.Errorf("%s %s#%d: GitHub listed %d of %d changed files", OpMergedFiles, pr.Repository, pr.Number, listed, got.GetChangedFiles())
+		return nil, fmt.Errorf("%s %s#%d: GitHub listed %d of %d changed files (it lists at most 3000)", OpMergedFiles, pr.Repository, pr.Number, listed, got.GetChangedFiles())
 	}
 	slices.SortFunc(out, func(a, b FileChange) int { return strings.Compare(a.Path, b.Path) })
 	return out, nil
 }
 
 // toFileChange maps a GitHub file status to a FileChange: a copy is a new
-// file, a mode-only change a modification, an unchanged file no change
+// file, a mode or type change a modification, an unchanged file no change
 // (ok false). An unknown status is an error.
 func toFileChange(f *github.CommitFile) (FileChange, bool, error) {
 	change := FileChange{Path: f.GetFilename()}
