@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -98,12 +101,14 @@ func TestGitHubRefusedTokenOnEveryPullRequestSeam(t *testing.T) {
 	_, _, findErr := gh.FindPullRequest(ctx, repoA, featureBranch)
 	_, draftErr := gh.OpenDraftPullRequest(ctx, repoA, featureBranch, mainBranch, "t", "b")
 	_, revertErr := gh.Revert(ctx, pr, "b", nil)
+	_, mergedFilesErr := gh.MergedFiles(ctx, pr)
 	for op, err := range map[string]error{
 		OpFindPullRequest: findErr,
 		OpOpenPullRequest: draftErr,
 		OpEnableAutoMerge: gh.EnableAutoMerge(ctx, pr),
 		OpClose:           gh.Close(ctx, pr, true),
 		OpRevert:          revertErr,
+		OpMergedFiles:     mergedFilesErr,
 	} {
 		var auth *AuthError
 		if !errors.As(err, &auth) || auth.Op != op || auth.Status != http.StatusForbidden {
@@ -522,6 +527,84 @@ func TestGitHubListFilesRefusesATruncatedTree(t *testing.T) {
 		t.Fatal("truncated tree: want error")
 	}
 }
+
+// mergedPullRequest serves pull request 7 as merged (or not) with changed as
+// its changed-file count, and its files endpoint as pages linked by rel="next".
+func mergedPullRequest(t *testing.T, merged bool, changed int, pages ...[]map[string]any) *GitHub {
+	t.Helper()
+	mux, gh := server(t)
+	mux.HandleFunc("/api/v3/repos/acme/management-clusters/pulls/7", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, map[string]any{numberKey: 7, "merged": merged, "changed_files": changed})
+	})
+	mux.HandleFunc("/api/v3/repos/acme/management-clusters/pulls/7/files", func(w http.ResponseWriter, r *http.Request) {
+		page := 1
+		if p := r.URL.Query().Get("page"); p != "" {
+			page, _ = strconv.Atoi(p)
+		}
+		if page < len(pages) {
+			w.Header().Set("Link", fmt.Sprintf(`<%s?page=%d>; rel="next"`, r.URL.Path, page+1))
+		}
+		writeJSON(t, w, pages[page-1])
+	})
+	return gh
+}
+
+func TestGitHubMergedFilesListsEveryPageWithItsKind(t *testing.T) {
+	gh := mergedPullRequest(t, true, 7,
+		[]map[string]any{
+			{filenameKey: "organizations/acme.yaml", statusKey: "removed"},
+			{filenameKey: addedFile, statusKey: "added"},
+			{filenameKey: "z/moved.yaml", statusKey: "renamed", "previous_filename": "moved.yaml"},
+		},
+		[]map[string]any{
+			{filenameKey: oneFile, statusKey: "modified"},
+			{filenameKey: "c.yaml", statusKey: "copied", "previous_filename": addedFile},
+			{filenameKey: "d.sh", statusKey: "changed"},
+			{filenameKey: "e.yaml", statusKey: "unchanged"},
+		},
+	)
+	var lister MergedFilesLister = gh
+	got, err := lister.MergedFiles(context.Background(), PullRequest{Repository: repoA, Number: 7})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []FileChange{
+		{Path: oneFile, Kind: FileModified},
+		{Path: addedFile, Kind: FileAdded},
+		{Path: "c.yaml", Kind: FileAdded},
+		{Path: "d.sh", Kind: FileModified},
+		{Path: "organizations/acme.yaml", Kind: FileRemoved},
+		{Path: "z/moved.yaml", Kind: FileRenamed, PreviousPath: "moved.yaml"},
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("MergedFiles = %+v, want %+v", got, want)
+	}
+}
+
+func TestGitHubMergedFilesRefusesWhatItCannotListWhole(t *testing.T) {
+	ctx := context.Background()
+	pr := PullRequest{Repository: repoA, Number: 7}
+	one := []map[string]any{{filenameKey: oneFile, statusKey: "modified"}}
+	if _, err := mergedPullRequest(t, false, 1, one).MergedFiles(ctx, pr); !errors.Is(err, ErrNotMerged) {
+		t.Errorf("not merged: want ErrNotMerged, got %v", err)
+	}
+	if _, err := mergedPullRequest(t, true, 3001, one).MergedFiles(ctx, pr); err == nil || !strings.Contains(err.Error(), "1 of 3001") {
+		t.Errorf("short listing: want an error naming the counts, got %v", err)
+	}
+	strange := []map[string]any{{filenameKey: oneFile, statusKey: "teleported"}}
+	if _, err := mergedPullRequest(t, true, 1, strange).MergedFiles(ctx, pr); err == nil || !strings.Contains(err.Error(), "teleported") {
+		t.Errorf("unknown status: want an error naming it, got %v", err)
+	}
+}
+
+// addedFile is the path the MergedFiles fakes add and copy from.
+const addedFile = "b.yaml"
+
+// filenameKey and statusKey are a pull request file's path and change kind in the GitHub API.
+const (
+	filenameKey = "filename"
+	statusKey   = "status"
+)
 
 // treeSHA is the SHA of the tree the ListFiles fakes answer with, headTree
 // the tree of a branch head the Commit and Revert fakes answer with.

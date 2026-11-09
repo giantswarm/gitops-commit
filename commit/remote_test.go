@@ -3,6 +3,7 @@ package commit
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -421,5 +422,157 @@ func TestFakeReadFileAtTheBranchHead(t *testing.T) {
 	f.Fail[OpReadFile] = &AuthError{Op: OpReadFile, Status: 401}
 	if _, err := f.ReadFile(ctx, repoA, mainBranch, ".sops.yaml"); !errors.Is(err, ErrAuth) {
 		t.Errorf("Fail: want ErrAuth, got %v", err)
+	}
+}
+
+func TestMergedFilesTellsTheMergeThatRemovedAFileFromOneThatDidNot(t *testing.T) {
+	const orgFile = "organizations/acme.yaml"
+	f := NewFake()
+	f.AddBranch(repoA, mainBranch, map[string][]byte{orgFile: []byte("kind: Organization"), readme: []byte("hello")})
+	ctx := context.Background()
+	var lister MergedFilesLister = f
+
+	deletion := opened(t, f, "delete-acme", map[string][]byte{orgFile: nil})
+	if err := Merge(ctx, f, deletion, true); err != nil {
+		t.Fatal(err)
+	}
+	// Merged after the deletion: the base lacks the file, but this merge did not remove it.
+	other := opened(t, f, "other", map[string][]byte{readme: []byte("changed")})
+	if err := Merge(ctx, f, other, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.ReadFile(ctx, repoA, mainBranch, orgFile); !errors.Is(err, ErrFileNotFound) {
+		t.Fatalf("the base still carries %s: %v", orgFile, err)
+	}
+
+	got, err := lister.MergedFiles(ctx, deletion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !Removes(got, orgFile) {
+		t.Errorf("the deletion's listing does not remove %s: %+v", orgFile, got)
+	}
+	got, err = lister.MergedFiles(ctx, other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if Removes(got, orgFile) {
+		t.Errorf("the other merge's listing removes %s: %+v", orgFile, got)
+	}
+	if want := []FileChange{{Path: readme, Kind: FileModified}}; !slices.Equal(got, want) {
+		t.Errorf("the other merge's listing = %+v, want %+v", got, want)
+	}
+}
+
+func TestMergedFilesNamesEveryKindSortedByPath(t *testing.T) {
+	f := NewFake()
+	f.AddBranch(repoA, mainBranch, map[string][]byte{
+		readme:    []byte("hello"),
+		oldFile:   []byte("old"),
+		movedFile: []byte("package moved"),
+		"same.go": []byte("package same"),
+	})
+	ctx := context.Background()
+	pr := opened(t, f, featureBranch, map[string][]byte{
+		readme:           []byte("changed"),
+		oldFile:          nil,
+		movedFile:        nil,
+		"z/" + movedFile: []byte("package moved"),
+		oneFile:          []byte("a"),
+		"same.go":        []byte("package same"),
+		"untouched.txt":  nil,
+	})
+	if err := Merge(ctx, f, pr, true); err != nil {
+		t.Fatal(err)
+	}
+	got, err := f.MergedFiles(ctx, pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []FileChange{
+		{Path: readme, Kind: FileModified},
+		{Path: oneFile, Kind: FileAdded},
+		{Path: oldFile, Kind: FileRemoved},
+		{Path: "z/" + movedFile, Kind: FileRenamed, PreviousPath: movedFile},
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("MergedFiles = %+v, want %+v", got, want)
+	}
+}
+
+func TestMergedFilesRefusesAPullRequestThatIsNotMerged(t *testing.T) {
+	f, _, _ := fixture(t)
+	ctx := context.Background()
+	open := opened(t, f, featureBranch, map[string][]byte{oneFile: []byte("a")})
+	if _, err := f.MergedFiles(ctx, open); !errors.Is(err, ErrNotMerged) {
+		t.Errorf("open: want ErrNotMerged, got %v", err)
+	}
+	if err := f.Close(ctx, open, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.MergedFiles(ctx, open); !errors.Is(err, ErrNotMerged) {
+		t.Errorf("closed: want ErrNotMerged, got %v", err)
+	}
+	if _, err := f.MergedFiles(ctx, PullRequest{Repository: repoA, Number: 99}); err == nil || errors.Is(err, ErrNotMerged) {
+		t.Errorf("unknown: want an error that is not ErrNotMerged, got %v", err)
+	}
+	f.Fail[OpMergedFiles] = &AuthError{Op: OpMergedFiles, Status: 401}
+	if _, err := f.MergedFiles(ctx, open); !errors.Is(err, ErrAuth) {
+		t.Errorf("Fail: want ErrAuth, got %v", err)
+	}
+}
+
+// movedFile is the path the rename in TestMergedFilesNamesEveryKindSortedByPath moves.
+const movedFile = "moved.go"
+
+func TestMergedFilesListsOnlyItsOwnChangeAfterAnotherMerge(t *testing.T) {
+	const orgA, orgB = "organizations/a.yaml", "organizations/b.yaml"
+	f := NewFake()
+	f.AddBranch(repoA, mainBranch, map[string][]byte{orgA: []byte("a"), orgB: []byte("b")})
+	ctx := context.Background()
+	// Both branches are cut from the same base; a merges first.
+	a := opened(t, f, "delete-a", map[string][]byte{orgA: nil})
+	b := opened(t, f, "delete-b", map[string][]byte{orgB: nil})
+	for _, pr := range []PullRequest{a, b} {
+		if err := Merge(ctx, f, pr, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := f.MergedFiles(ctx, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []FileChange{{Path: orgB, Kind: FileRemoved}}; !slices.Equal(got, want) {
+		t.Errorf("MergedFiles(b) = %+v, want %+v", got, want)
+	}
+}
+
+func TestRemovesCountsARenameFromThePath(t *testing.T) {
+	changes := []FileChange{
+		{Path: "z/" + movedFile, Kind: FileRenamed, PreviousPath: movedFile},
+		{Path: oldFile, Kind: FileRemoved},
+		{Path: readme, Kind: FileModified},
+	}
+	for path, want := range map[string]bool{movedFile: true, oldFile: true, "z/" + movedFile: false, readme: false} {
+		if got := Removes(changes, path); got != want {
+			t.Errorf("Removes(%s) = %v, want %v", path, got, want)
+		}
+	}
+}
+
+func TestMergedFilesPairsNoEmptyFileAsARename(t *testing.T) {
+	f := NewFake()
+	f.AddBranch(repoA, mainBranch, map[string][]byte{oldFile: {}})
+	ctx := context.Background()
+	pr := opened(t, f, featureBranch, map[string][]byte{oldFile: nil, oneFile: {}})
+	if err := Merge(ctx, f, pr, true); err != nil {
+		t.Fatal(err)
+	}
+	got, err := f.MergedFiles(ctx, pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []FileChange{{Path: oneFile, Kind: FileAdded}, {Path: oldFile, Kind: FileRemoved}}; !slices.Equal(got, want) {
+		t.Errorf("MergedFiles = %+v, want %+v", got, want)
 	}
 }

@@ -407,7 +407,7 @@ func (g *GitHub) Revert(ctx context.Context, pr PullRequest, body string, overri
 		return PullRequest{}, wrap(OpRevert, err)
 	}
 	if !got.GetMerged() {
-		return PullRequest{}, ErrNotMerged
+		return PullRequest{}, errRevertNotMerged
 	}
 	mergeSHA := got.GetMergeCommitSHA()
 	merge, _, err := g.gh.Git.GetCommit(ctx, owner, name, mergeSHA)
@@ -548,6 +548,72 @@ func (g *GitHub) ListFiles(ctx context.Context, repo Repository, branch, dir str
 	}
 	slices.Sort(out)
 	return out, nil
+}
+
+// MergedFiles lists the merged pull request's files through GitHub's pull
+// request files endpoint, page by page. GitHub lists at most 3000 files; a
+// listing shorter than the pull request's changed-file count is an error,
+// never a partial answer.
+func (g *GitHub) MergedFiles(ctx context.Context, pr PullRequest) ([]FileChange, error) {
+	owner, name := pr.Repository.Owner, pr.Repository.Name
+	got, _, err := g.gh.PullRequests.Get(ctx, owner, name, pr.Number)
+	if err != nil {
+		return nil, wrap(OpMergedFiles, err)
+	}
+	if !got.GetMerged() {
+		return nil, fmt.Errorf("%s %s#%d: %w", OpMergedFiles, pr.Repository, pr.Number, ErrNotMerged)
+	}
+	var listed int
+	var out []FileChange
+	opts := &github.ListOptions{PerPage: pageSize}
+	for {
+		files, resp, err := g.gh.PullRequests.ListFiles(ctx, owner, name, pr.Number, opts)
+		if err != nil {
+			return nil, wrap(OpMergedFiles, err)
+		}
+		listed += len(files)
+		for _, f := range files {
+			change, ok, err := toFileChange(f)
+			if err != nil {
+				return nil, fmt.Errorf("%s %s#%d: %w", OpMergedFiles, pr.Repository, pr.Number, err)
+			}
+			if ok {
+				out = append(out, change)
+			}
+		}
+		if resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+	}
+	if listed < got.GetChangedFiles() {
+		return nil, fmt.Errorf("%s %s#%d: GitHub listed %d of %d changed files (it lists at most 3000)", OpMergedFiles, pr.Repository, pr.Number, listed, got.GetChangedFiles())
+	}
+	slices.SortFunc(out, func(a, b FileChange) int { return strings.Compare(a.Path, b.Path) })
+	return out, nil
+}
+
+// toFileChange maps a GitHub file status to a FileChange: a copy is a new
+// file, a mode or type change a modification, an unchanged file no change
+// (ok false). An unknown status is an error.
+func toFileChange(f *github.CommitFile) (FileChange, bool, error) {
+	change := FileChange{Path: f.GetFilename()}
+	switch f.GetStatus() {
+	case "added", "copied":
+		change.Kind = FileAdded
+	case "modified", "changed":
+		change.Kind = FileModified
+	case "removed":
+		change.Kind = FileRemoved
+	case "renamed":
+		change.Kind = FileRenamed
+		change.PreviousPath = f.GetPreviousFilename()
+	case "unchanged":
+		return FileChange{}, false, nil
+	default:
+		return FileChange{}, false, fmt.Errorf("%s has status %q", change.Path, f.GetStatus())
+	}
+	return change, true, nil
 }
 
 // deletedEntry removes path from the tree: an entry without sha and content.
