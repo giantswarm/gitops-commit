@@ -678,6 +678,9 @@ func TestGitHubFindPullRequestsByPrefixReadsEveryPageAndKeepsTheRepositorysOwn(t
 	const perPage = 2
 	mux, gh := server(t)
 	mux.HandleFunc("GET /api/v3/repos/acme/management-clusters/pulls", func(w http.ResponseWriter, r *http.Request) {
+		if q := r.URL.Query(); q.Get("sort") != "created" || q.Get("direction") != "asc" {
+			t.Errorf("pages read in order %q %q, want oldest first", q.Get("sort"), q.Get("direction"))
+		}
 		var listed []map[string]any
 		for _, pr := range all {
 			if r.URL.Query().Get("state") != stateOpen || pr["test_open"] == true {
@@ -690,7 +693,7 @@ func TestGitHubFindPullRequestsByPrefixReadsEveryPageAndKeepsTheRepositorysOwn(t
 		}
 		start, end := (page-1)*perPage, min(page*perPage, len(listed))
 		if end < len(listed) {
-			w.Header().Set("Link", fmt.Sprintf(`<%s?state=open&page=%d>; rel="next"`, r.URL.Path, page+1))
+			w.Header().Set("Link", fmt.Sprintf(`<%s?state=open&sort=created&direction=asc&page=%d>; rel="next"`, r.URL.Path, page+1))
 		}
 		writeJSON(t, w, listed[start:end])
 	})

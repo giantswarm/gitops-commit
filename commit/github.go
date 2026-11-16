@@ -1,6 +1,7 @@
 package commit
 
 import (
+	"cmp"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -272,13 +273,20 @@ func (g *GitHub) findPullRequest(ctx context.Context, repo Repository, head stri
 // page and keeps those whose head branch starts with prefix and lives in the
 // repository itself: GitHub's head filter takes an exact branch name only.
 // The head is the repository's own when its repository ID is the base's; a
-// fork's pull request, or one whose fork was deleted, is left out.
+// fork's pull request, or one whose fork was deleted, is left out. The pages
+// are read oldest first, so a pull request opened during the read goes to
+// the last page and shifts none of the pages still to read.
 func (g *GitHub) FindPullRequestsByPrefix(ctx context.Context, repo Repository, prefix string) ([]PullRequest, error) {
 	if prefix == "" {
 		return nil, fmt.Errorf("%s: empty prefix: %w", OpFindByPrefix, ErrInvalidRequest)
 	}
 	var out []PullRequest
-	opts := &github.PullRequestListOptions{State: "open", ListOptions: github.ListOptions{PerPage: pageSize}}
+	opts := &github.PullRequestListOptions{
+		State:       "open",
+		Sort:        "created",
+		Direction:   "asc",
+		ListOptions: github.ListOptions{PerPage: pageSize},
+	}
 	for {
 		open, resp, err := g.gh.PullRequests.List(ctx, repo.Owner, repo.Name, opts)
 		if err != nil {
@@ -295,7 +303,7 @@ func (g *GitHub) FindPullRequestsByPrefix(ctx context.Context, repo Repository, 
 		}
 		opts.Page = resp.NextPage
 	}
-	slices.SortFunc(out, func(a, b PullRequest) int { return a.Number - b.Number })
+	slices.SortFunc(out, func(a, b PullRequest) int { return cmp.Compare(a.Number, b.Number) })
 	return out, nil
 }
 

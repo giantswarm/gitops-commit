@@ -239,6 +239,12 @@ type PrefixFinder interface {
 	// head branch is in repo itself (never a fork's branch of that name) and
 	// starts with prefix, sorted by number; none when there is no such pull
 	// request. An empty prefix is ErrInvalidRequest.
+	//
+	// A prefix matches every branch that starts with it: end it with a
+	// separator that the family's own name cannot carry, so that "org-a-"
+	// does not also find the branches of a family "org-a-prod-". The result
+	// is not a snapshot: on GitHub, past one page of open pull requests, one
+	// that closes during the read can hide another one from it.
 	FindPullRequestsByPrefix(ctx context.Context, repo Repository, prefix string) ([]PullRequest, error)
 }
 

@@ -2,6 +2,7 @@ package commit
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -445,7 +446,7 @@ func (f *Fake) FindPullRequestsByPrefix(_ context.Context, repo Repository, pref
 			out = append(out, pr)
 		}
 	}
-	slices.SortFunc(out, func(a, b PullRequest) int { return a.Number - b.Number })
+	slices.SortFunc(out, func(a, b PullRequest) int { return cmp.Compare(a.Number, b.Number) })
 	return out, nil
 }
 
