@@ -102,8 +102,10 @@ func TestGitHubRefusedTokenOnEveryPullRequestSeam(t *testing.T) {
 	_, draftErr := gh.OpenDraftPullRequest(ctx, repoA, featureBranch, mainBranch, "t", "b")
 	_, revertErr := gh.Revert(ctx, pr, "b", nil)
 	_, mergedFilesErr := gh.MergedFiles(ctx, pr)
+	_, prefixErr := gh.FindPullRequestsByPrefix(ctx, repoA, featureBranch)
 	for op, err := range map[string]error{
 		OpFindPullRequest: findErr,
+		OpFindByPrefix:    prefixErr,
 		OpOpenPullRequest: draftErr,
 		OpEnableAutoMerge: gh.EnableAutoMerge(ctx, pr),
 		OpClose:           gh.Close(ctx, pr, true),
@@ -647,6 +649,71 @@ func TestGitHubMergedFilesRefusesWhatItCannotListWhole(t *testing.T) {
 	strange := []map[string]any{{filenameKey: oneFile, statusKey: "teleported"}}
 	if _, err := mergedPullRequest(t, true, 1, strange).MergedFiles(ctx, pr); err == nil || !strings.Contains(err.Error(), "teleported") {
 		t.Errorf("unknown status: want an error naming it, got %v", err)
+	}
+}
+
+func TestGitHubFindPullRequestsByPrefixReadsEveryPageAndKeepsTheRepositorysOwn(t *testing.T) {
+	const (
+		prefix    = "org-acme-"
+		own       = 10 // the repository's ID
+		fork      = 20
+		stateOpen = "open"
+	)
+	pull := func(number int, ref string, headRepo any, open bool) map[string]any {
+		return map[string]any{
+			numberKey: number, "test_open": open,
+			headKey: map[string]any{refKey: ref, shaKey: fmt.Sprintf("sha%d", number), "repo": headRepo},
+			baseKey: map[string]any{refKey: mainBranch, "repo": map[string]any{"id": own}},
+		}
+	}
+	all := []map[string]any{
+		pull(9, prefix+"z9", map[string]any{"id": own}, true),
+		pull(8, "other-"+prefix+"x8", map[string]any{"id": own}, true),
+		pull(7, prefix+"y7", map[string]any{"id": fork}, true),
+		pull(6, prefix+"w6", nil, true), // its fork was deleted
+		pull(5, prefix+"v5", map[string]any{"id": own}, false),
+		pull(4, featureBranch, map[string]any{"id": own}, true),
+		pull(3, prefix+"u3", map[string]any{"id": own}, true),
+	}
+	const perPage = 2
+	mux, gh := server(t)
+	mux.HandleFunc("GET /api/v3/repos/acme/management-clusters/pulls", func(w http.ResponseWriter, r *http.Request) {
+		if q := r.URL.Query(); q.Get("sort") != "created" || q.Get("direction") != "asc" {
+			t.Errorf("pages read in order %q %q, want oldest first", q.Get("sort"), q.Get("direction"))
+		}
+		var listed []map[string]any
+		for _, pr := range all {
+			if r.URL.Query().Get("state") != stateOpen || pr["test_open"] == true {
+				listed = append(listed, pr)
+			}
+		}
+		page := 1
+		if p := r.URL.Query().Get("page"); p != "" {
+			page, _ = strconv.Atoi(p)
+		}
+		start, end := (page-1)*perPage, min(page*perPage, len(listed))
+		if end < len(listed) {
+			w.Header().Set("Link", fmt.Sprintf(`<%s?state=open&sort=created&direction=asc&page=%d>; rel="next"`, r.URL.Path, page+1))
+		}
+		writeJSON(t, w, listed[start:end])
+	})
+	var finder PrefixFinder = gh
+	got, err := finder.FindPullRequestsByPrefix(context.Background(), repoA, prefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []PullRequest{
+		{Repository: repoA, Number: 3, Head: prefix + "u3", Base: mainBranch, HeadSHA: "sha3"},
+		{Repository: repoA, Number: 9, Head: prefix + "z9", Base: mainBranch, HeadSHA: "sha9"},
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("FindPullRequestsByPrefix = %+v, want %+v", got, want)
+	}
+	if got, err := finder.FindPullRequestsByPrefix(context.Background(), repoA, "nobody-"); err != nil || len(got) != 0 {
+		t.Errorf("no match: got %+v err=%v", got, err)
+	}
+	if _, err := finder.FindPullRequestsByPrefix(context.Background(), repoA, ""); !errors.Is(err, ErrInvalidRequest) {
+		t.Errorf("empty prefix: want ErrInvalidRequest, got %v", err)
 	}
 }
 

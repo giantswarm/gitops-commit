@@ -2,6 +2,7 @@ package commit
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -424,6 +425,29 @@ func (f *Fake) FindPullRequest(_ context.Context, repo Repository, head string) 
 	}
 	pr.HeadSHA = f.heads[key(repo, head)]
 	return pr.PullRequest, true, nil
+}
+
+// FindPullRequestsByPrefix implements PrefixFinder. Every branch of the Fake
+// is in its repository: the Fake holds no forks.
+func (f *Fake) FindPullRequestsByPrefix(_ context.Context, repo Repository, prefix string) ([]PullRequest, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.Fail[OpFindByPrefix]; err != nil {
+		return nil, err
+	}
+	if prefix == "" {
+		return nil, fmt.Errorf("%s: empty prefix: %w", OpFindByPrefix, ErrInvalidRequest)
+	}
+	var out []PullRequest
+	for _, p := range f.prs {
+		if p.Repository == repo && p.open() && strings.HasPrefix(p.Head, prefix) {
+			pr := p.PullRequest
+			pr.HeadSHA = f.heads[key(repo, p.Head)]
+			out = append(out, pr)
+		}
+	}
+	slices.SortFunc(out, func(a, b PullRequest) int { return cmp.Compare(a.Number, b.Number) })
+	return out, nil
 }
 
 // EnableAutoMerge implements Remote: the pull request is marked, nothing merges by itself.

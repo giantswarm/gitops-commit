@@ -277,16 +277,61 @@ func TestRevertRefusesAMergeThatChangedNothing(t *testing.T) {
 	}
 }
 
+func TestFindPullRequestsByPrefixFindsEveryOpenOneOfTheFamily(t *testing.T) {
+	f, _, _ := fixture(t)
+	ctx := context.Background()
+	var finder PrefixFinder = f
+	const prefix = "org-acme-"
+	numbers := func(prs []PullRequest) []int {
+		out := []int{}
+		for _, pr := range prs {
+			out = append(out, pr.Number)
+		}
+		return out
+	}
+
+	if got, err := finder.FindPullRequestsByPrefix(ctx, repoA, prefix); err != nil || len(got) != 0 {
+		t.Fatalf("no pull request: got %+v err=%v", got, err)
+	}
+	opened(t, f, "other-org-acme-x1", map[string][]byte{oneFile: []byte("inside")})
+	if got, err := finder.FindPullRequestsByPrefix(ctx, repoA, prefix); err != nil || len(got) != 0 {
+		t.Fatalf("prefix inside the name only: got %+v err=%v", got, err)
+	}
+	first := opened(t, f, prefix+"a1", map[string][]byte{oneFile: []byte("one")})
+	got, err := finder.FindPullRequestsByPrefix(ctx, repoA, prefix)
+	if err != nil || len(got) != 1 || got[0].Number != first.Number || got[0].Head != prefix+"a1" || got[0].HeadSHA != first.HeadSHA {
+		t.Fatalf("one match: got %+v err=%v", got, err)
+	}
+	second := opened(t, f, prefix+"b2", map[string][]byte{oneFile: []byte("two")})
+	closed := opened(t, f, prefix+"c3", map[string][]byte{oneFile: []byte("three")})
+	if err := f.Close(ctx, closed, false); err != nil {
+		t.Fatal(err)
+	}
+	got, err = finder.FindPullRequestsByPrefix(ctx, repoA, prefix)
+	if err != nil || !slices.Equal(numbers(got), []int{first.Number, second.Number}) {
+		t.Fatalf("two open and one closed: got %+v err=%v", got, err)
+	}
+	if got, err := finder.FindPullRequestsByPrefix(ctx, repoB, prefix); err != nil || len(got) != 0 {
+		t.Errorf("another repository: got %+v err=%v", got, err)
+	}
+	if _, err := finder.FindPullRequestsByPrefix(ctx, repoA, ""); !errors.Is(err, ErrInvalidRequest) {
+		t.Errorf("empty prefix: want ErrInvalidRequest, got %v", err)
+	}
+}
+
 func TestFakeFailCoversTheNewOperations(t *testing.T) {
 	f, _, _ := fixture(t)
 	ctx := context.Background()
 	pr := opened(t, f, "fail", map[string][]byte{oneFile: []byte("a")})
 	boom := errors.New("boom")
 	f.Fail[OpFindPullRequest], f.Fail[OpEnableAutoMerge], f.Fail[OpClose], f.Fail[OpRevert] = boom, boom, boom, boom
+	f.Fail[OpFindByPrefix] = boom
 	_, _, findErr := f.FindPullRequest(ctx, repoA, "fail")
+	_, prefixErr := f.FindPullRequestsByPrefix(ctx, repoA, "fa")
 	_, revertErr := f.Revert(ctx, pr, "", nil)
 	for op, err := range map[string]error{
 		OpFindPullRequest: findErr,
+		OpFindByPrefix:    prefixErr,
 		OpEnableAutoMerge: f.EnableAutoMerge(ctx, pr),
 		OpClose:           f.Close(ctx, pr, false),
 		OpRevert:          revertErr,

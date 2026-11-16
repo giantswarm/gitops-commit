@@ -1,6 +1,7 @@
 package commit
 
 import (
+	"cmp"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -266,6 +267,44 @@ func (g *GitHub) findPullRequest(ctx context.Context, repo Repository, head stri
 		return PullRequest{}, false, nil
 	}
 	return toPullRequest(repo, open[0]), true, nil
+}
+
+// FindPullRequestsByPrefix lists the repository's open pull requests page by
+// page and keeps those whose head branch starts with prefix and lives in the
+// repository itself: GitHub's head filter takes an exact branch name only.
+// The head is the repository's own when its repository ID is the base's; a
+// fork's pull request, or one whose fork was deleted, is left out. The pages
+// are read oldest first, so a pull request opened during the read goes to
+// the last page and shifts none of the pages still to read.
+func (g *GitHub) FindPullRequestsByPrefix(ctx context.Context, repo Repository, prefix string) ([]PullRequest, error) {
+	if prefix == "" {
+		return nil, fmt.Errorf("%s: empty prefix: %w", OpFindByPrefix, ErrInvalidRequest)
+	}
+	var out []PullRequest
+	opts := &github.PullRequestListOptions{
+		State:       "open",
+		Sort:        "created",
+		Direction:   "asc",
+		ListOptions: github.ListOptions{PerPage: pageSize},
+	}
+	for {
+		open, resp, err := g.gh.PullRequests.List(ctx, repo.Owner, repo.Name, opts)
+		if err != nil {
+			return nil, wrap(OpFindByPrefix, err)
+		}
+		for _, pr := range open {
+			headRepo := pr.GetHead().GetRepo().GetID()
+			if headRepo != 0 && headRepo == pr.GetBase().GetRepo().GetID() && strings.HasPrefix(pr.GetHead().GetRef(), prefix) {
+				out = append(out, toPullRequest(repo, pr))
+			}
+		}
+		if resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+	}
+	slices.SortFunc(out, func(a, b PullRequest) int { return cmp.Compare(a.Number, b.Number) })
+	return out, nil
 }
 
 // Status reads the pull request, its reviews, and the statuses and check runs
