@@ -518,6 +518,59 @@ func TestGitHubListFilesListsTheDirectoryFromTheRecursiveTree(t *testing.T) {
 	}
 }
 
+func TestGitHubReadsOneRevisionAtTheHeadItResolved(t *testing.T) {
+	const (
+		repoPath = "/api/v3/repos/acme/management-clusters"
+		head     = "0123456789abcdef0123456789abcdef01234567"
+		missing  = "fedcba9876543210fedcba9876543210fedcba98"
+	)
+	mux, gh := server(t)
+	mux.HandleFunc("GET "+repoPath+"/git/ref/heads/main", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, map[string]any{refKey: refsHeadPrefix + mainBranch, objectKey: map[string]any{shaKey: head}})
+	})
+	mux.HandleFunc("GET "+repoPath+"/git/trees/"+head, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, map[string]any{shaKey: treeSHA, treeKey: []map[string]any{{pathKey: kustomizationPath, typeKey: blobType}}})
+	})
+	mux.HandleFunc("GET "+repoPath+"/contents/a/kustomization.yaml", func(w http.ResponseWriter, r *http.Request) {
+		if ref := r.URL.Query().Get(refKey); ref != head {
+			http.Error(w, `{"message":"No commit found for the ref"}`, http.StatusNotFound)
+			return
+		}
+		writeJSON(t, w, map[string]any{typeKey: fileType, shaKey: "blob9", pathKey: kustomizationPath})
+	})
+	mux.HandleFunc("GET "+repoPath+"/git/blobs/blob9", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("resources: []"))
+	})
+	mux.HandleFunc("GET "+repoPath+"/git/trees/", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
+	})
+	ctx := context.Background()
+	sha, err := gh.Head(ctx, repoA, mainBranch)
+	if err != nil || sha != head {
+		t.Fatalf("Head = %q, %v", sha, err)
+	}
+	paths, err := gh.ListFiles(ctx, repoA, sha, "a")
+	if err != nil || strings.Join(paths, ",") != kustomizationPath {
+		t.Fatalf("ListFiles at the SHA = %q, %v", paths, err)
+	}
+	got, err := gh.ReadFile(ctx, repoA, sha, paths[0])
+	if err != nil || string(got) != "resources: []" {
+		t.Fatalf("ReadFile at the SHA = %q, %v", got, err)
+	}
+	if _, err := gh.ReadFile(ctx, repoA, missing, kustomizationPath); !errors.Is(err, ErrFileNotFound) {
+		t.Errorf("ReadFile at a missing commit: want ErrFileNotFound, got %v", err)
+	}
+	if _, err := gh.ListFiles(ctx, repoA, missing, "a"); !errors.Is(err, ErrFileNotFound) {
+		t.Errorf("ListFiles at a missing commit: want ErrFileNotFound, got %v", err)
+	}
+	if _, err := gh.ListFiles(ctx, repoA, "gone", "a"); err == nil || errors.Is(err, ErrFileNotFound) {
+		t.Errorf("ListFiles at a missing branch: want the error it gave before, got %v", err)
+	}
+	if _, err := refusing(t, http.StatusUnauthorized).Head(ctx, repoA, mainBranch); !errors.Is(err, ErrAuth) {
+		t.Errorf("Head refused: want ErrAuth, got %v", err)
+	}
+}
+
 func TestGitHubListFilesRefusesATruncatedTree(t *testing.T) {
 	mux, gh := server(t)
 	mux.HandleFunc("/api/v3/repos/acme/management-clusters/git/trees/main", func(w http.ResponseWriter, _ *http.Request) {
