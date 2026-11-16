@@ -509,18 +509,30 @@ func (g *GitHub) blobEntry(ctx context.Context, op string, repo Repository, path
 	return &github.TreeEntry{Path: new(path), Mode: new(blobMode), Type: new(blobType), SHA: new(blob.GetSHA())}, nil
 }
 
-// ReadFile returns the content of path at the head of branch, through the
-// Git blob so a file past the contents API's 1 MB inline limit reads whole.
-func (g *GitHub) ReadFile(ctx context.Context, repo Repository, branch, path string) ([]byte, error) {
-	file, _, _, err := g.gh.Repositories.GetContents(ctx, repo.Owner, repo.Name, path, &github.RepositoryContentGetOptions{Ref: branch})
+// Head returns the SHA of the commit at the head of branch, from the
+// branch's ref.
+func (g *GitHub) Head(ctx context.Context, repo Repository, branch string) (string, error) {
+	ref, _, err := g.gh.Git.GetRef(ctx, repo.Owner, repo.Name, headsPrefix+branch)
+	if err != nil {
+		return "", wrap(OpHead, err)
+	}
+	return ref.GetObject().GetSHA(), nil
+}
+
+// ReadFile returns the content of path at ref — a branch's head or a commit
+// — through the Git blob so a file past the contents API's 1 MB inline limit
+// reads whole. GitHub answers 404 for a missing path and for a missing
+// commit alike.
+func (g *GitHub) ReadFile(ctx context.Context, repo Repository, ref, path string) ([]byte, error) {
+	file, _, _, err := g.gh.Repositories.GetContents(ctx, repo.Owner, repo.Name, path, &github.RepositoryContentGetOptions{Ref: ref})
 	if hasStatus(err, http.StatusNotFound) {
-		return nil, fmt.Errorf("%s %s/%s@%s: %w", OpReadFile, repo, path, branch, ErrFileNotFound)
+		return nil, fmt.Errorf("%s %s/%s@%s: %w", OpReadFile, repo, path, ref, ErrFileNotFound)
 	}
 	if err != nil {
 		return nil, wrap(OpReadFile, err)
 	}
 	if file == nil || file.GetType() != "file" {
-		return nil, fmt.Errorf("%s %s/%s@%s: not a file: %w", OpReadFile, repo, path, branch, ErrFileNotFound)
+		return nil, fmt.Errorf("%s %s/%s@%s: not a file: %w", OpReadFile, repo, path, ref, ErrFileNotFound)
 	}
 	raw, _, err := g.gh.Git.GetBlobRaw(ctx, repo.Owner, repo.Name, file.GetSHA())
 	if err != nil {
@@ -529,16 +541,20 @@ func (g *GitHub) ReadFile(ctx context.Context, repo Repository, branch, path str
 	return raw, nil
 }
 
-// ListFiles returns the files under dir at the head of branch, from the
-// branch's recursive Git tree. A tree GitHub truncates is an error, never a
-// partial answer.
-func (g *GitHub) ListFiles(ctx context.Context, repo Repository, branch, dir string) ([]string, error) {
-	tree, _, err := g.gh.Git.GetTree(ctx, repo.Owner, repo.Name, branch, true)
+// ListFiles returns the files under dir at ref — a branch's head or a
+// commit — from its recursive Git tree. A tree GitHub truncates is an error,
+// never a partial answer. A commit SHA GitHub does not find is
+// ErrFileNotFound; a missing branch stays the error GitHub answers.
+func (g *GitHub) ListFiles(ctx context.Context, repo Repository, ref, dir string) ([]string, error) {
+	tree, _, err := g.gh.Git.GetTree(ctx, repo.Owner, repo.Name, ref, true)
+	if hasStatus(err, http.StatusNotFound) && isCommitSHA(ref) {
+		return nil, fmt.Errorf("%s %s/%s@%s: no such commit: %w", OpListFiles, repo, dir, ref, ErrFileNotFound)
+	}
 	if err != nil {
 		return nil, wrap(OpListFiles, err)
 	}
 	if tree.GetTruncated() {
-		return nil, fmt.Errorf("%s %s/%s@%s: the repository's tree is too large for one read", OpListFiles, repo, dir, branch)
+		return nil, fmt.Errorf("%s %s/%s@%s: the repository's tree is too large for one read", OpListFiles, repo, dir, ref)
 	}
 	var out []string
 	for _, e := range tree.Entries {

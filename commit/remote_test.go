@@ -3,6 +3,7 @@ package commit
 import (
 	"context"
 	"errors"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -422,6 +423,98 @@ func TestFakeReadFileAtTheBranchHead(t *testing.T) {
 	f.Fail[OpReadFile] = &AuthError{Op: OpReadFile, Status: 401}
 	if _, err := f.ReadFile(ctx, repoA, mainBranch, ".sops.yaml"); !errors.Is(err, ErrAuth) {
 		t.Errorf("Fail: want ErrAuth, got %v", err)
+	}
+}
+
+// readAll lists dir at ref and reads every listed file at ref.
+func readAll(t *testing.T, f *Fake, ref, dir string) map[string]string {
+	t.Helper()
+	ctx := context.Background()
+	paths, err := f.ListFiles(ctx, repoA, ref, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, p := range paths {
+		content, err := f.ReadFile(ctx, repoA, ref, p)
+		if err != nil {
+			t.Fatalf("ReadFile(%s@%s): %v", p, ref, err)
+		}
+		got[p] = string(content)
+	}
+	return got
+}
+
+func TestFakeReadsOneRevisionAtTheHeadItResolved(t *testing.T) {
+	const (
+		orgA, orgB, movedA = "orgs/a.yaml", "orgs/b.yaml", "orgs/moved/a.yaml"
+		contentA           = "org a"
+	)
+	f := NewFake()
+	f.AddBranch(repoA, mainBranch, map[string][]byte{orgA: []byte(contentA), orgB: []byte("org b")})
+	ctx := context.Background()
+	sha, err := f.Head(ctx, repoA, mainBranch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths, err := f.ListFiles(ctx, repoA, sha, "orgs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A commit lands between the list and the reads: it moves one file and
+	// changes the other.
+	if err := f.Commit(ctx, repoA, mainBranch, "move", map[string][]byte{
+		orgA: nil, movedA: []byte(contentA), orgB: []byte("org b v2"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, p := range paths {
+		content, err := f.ReadFile(ctx, repoA, sha, p)
+		if err != nil {
+			t.Fatalf("ReadFile(%s) at the resolved commit after a later commit: %v", p, err)
+		}
+		got[p] = string(content)
+	}
+	want := map[string]string{orgA: contentA, orgB: "org b"}
+	if !maps.Equal(got, want) {
+		t.Errorf("at the resolved commit = %v, want %v", got, want)
+	}
+	// The branch name reads the new head, as before.
+	want = map[string]string{movedA: contentA, orgB: "org b v2"}
+	if got := readAll(t, f, mainBranch, "orgs"); !maps.Equal(got, want) {
+		t.Errorf("at the branch = %v, want %v", got, want)
+	}
+}
+
+func TestFakeReadAtAMissingCommitIsNotFound(t *testing.T) {
+	f := NewFake()
+	f.AddBranch(repoA, mainBranch, map[string][]byte{readme: []byte("a")})
+	f.AddBranch(repoB, mainBranch, map[string][]byte{readme: []byte("b")})
+	ctx := context.Background()
+	otherRepos, err := f.Head(ctx, repoB, mainBranch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ref := range []string{strings.Repeat("0", 40), otherRepos} {
+		if _, err := f.ReadFile(ctx, repoA, ref, readme); !errors.Is(err, ErrFileNotFound) {
+			t.Errorf("ReadFile at %s: want ErrFileNotFound, got %v", ref, err)
+		}
+		if _, err := f.ListFiles(ctx, repoA, ref, "orgs"); !errors.Is(err, ErrFileNotFound) {
+			t.Errorf("ListFiles at %s: want ErrFileNotFound, got %v", ref, err)
+		}
+	}
+	// A missing branch keeps the error it gave before.
+	if _, err := f.ReadFile(ctx, repoA, "gone", readme); err == nil || errors.Is(err, ErrFileNotFound) || !strings.Contains(err.Error(), "has no branch") {
+		t.Errorf("ReadFile at a missing branch: want the missing-branch error, got %v", err)
+	}
+	if _, err := f.Head(ctx, repoA, "gone"); err == nil || !strings.Contains(err.Error(), "has no branch") {
+		t.Errorf("Head of a missing branch: want the missing-branch error, got %v", err)
+	}
+	boom := errors.New("boom")
+	f.Fail[OpHead] = boom
+	if _, err := f.Head(ctx, repoA, mainBranch); !errors.Is(err, boom) {
+		t.Errorf("Fail[OpHead]: want boom, got %v", err)
 	}
 }
 

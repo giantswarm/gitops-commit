@@ -7,6 +7,21 @@
 // and a token GitHub refuses surfaces as ErrAuth carrying the HTTP status; the
 // callers turn it into their sign-in answer. Nothing is retried with another
 // token, nothing is logged, and no error carries file content.
+//
+// # Reading one revision
+//
+// ReadFile and ListFiles take a branch name or a commit SHA. With a branch
+// name each call reads the branch's head when it runs, so a list and the
+// reads after it can see two revisions when a commit lands between them: a
+// file the commit moved reads as ErrFileNotFound, and its new path is not in
+// the list. To read one consistent revision, resolve the head once and pass
+// the SHA to every call:
+//
+//	sha, err := remote.Head(ctx, repo, "main")
+//	paths, err := remote.ListFiles(ctx, repo, sha, dir)
+//	for _, p := range paths {
+//		content, err := remote.ReadFile(ctx, repo, sha, p)
+//	}
 package commit
 
 import (
@@ -121,24 +136,56 @@ type Remote interface {
 	Revert(ctx context.Context, pr PullRequest, body string, overrides map[string][]byte) (PullRequest, error)
 }
 
-// Reader reads a repository's files at a branch: what a caller renders
-// against before it lands a change — the kustomization.yaml it extends, the
-// .sops.yaml it encrypts for, whether a file it would remove exists. GitHub
-// and Fake implement it.
+// Reader reads a repository's files at a branch or a commit: what a caller
+// renders against before it lands a change — the kustomization.yaml it
+// extends, the .sops.yaml it encrypts for, whether a file it would remove
+// exists. GitHub and Fake implement it.
+//
+// ref is a branch name, read at the branch's head when the call runs, or a
+// full commit SHA (from HeadReader.Head), read at that commit. Two calls with
+// a branch name can see two revisions when a commit lands between them; a
+// caller that lists a directory and reads its files resolves the head once
+// with Head and passes the SHA to every call.
 type Reader interface {
-	// ReadFile returns the content of path at the head of branch, or
-	// ErrFileNotFound.
-	ReadFile(ctx context.Context, repo Repository, branch, path string) ([]byte, error)
+	// ReadFile returns the content of path at ref, or ErrFileNotFound: no
+	// file at path, or ref a commit SHA the repository does not have.
+	ReadFile(ctx context.Context, repo Repository, ref, path string) ([]byte, error)
 }
 
-// Lister lists a directory of a repository at a branch: what a caller
-// removes as a whole (a workload cluster's directory) or checks is there
-// before it writes into it. GitHub and Fake implement it.
+// Lister lists a directory of a repository at a branch or a commit: what a
+// caller removes as a whole (a workload cluster's directory) or checks is
+// there before it writes into it. GitHub and Fake implement it. ref is read
+// as Reader reads it.
 type Lister interface {
 	// ListFiles returns the repository-relative paths of every file under
-	// dir at the head of branch, recursively and sorted; none when the
-	// branch carries no such directory.
-	ListFiles(ctx context.Context, repo Repository, branch, dir string) ([]string, error)
+	// dir at ref, recursively and sorted; none when ref carries no such
+	// directory. A commit SHA the repository does not have is
+	// ErrFileNotFound.
+	ListFiles(ctx context.Context, repo Repository, ref, dir string) ([]string, error)
+}
+
+// HeadReader resolves a branch's head to its commit SHA, so that a caller
+// reads one revision: Head once, then every ListFiles and ReadFile at the SHA
+// it returns. A commit that lands on the branch after Head changes nothing
+// those calls read. GitHub and Fake implement it.
+type HeadReader interface {
+	// Head returns the SHA of the commit at the head of branch.
+	Head(ctx context.Context, repo Repository, branch string) (string, error)
+}
+
+// isCommitSHA reports whether ref has the shape of a full commit SHA: 40
+// hexadecimal digits (SHA-1) or 64 (SHA-256). A ref of that shape that names
+// no branch and no commit is a missing commit, ErrFileNotFound.
+func isCommitSHA(ref string) bool {
+	if len(ref) != 40 && len(ref) != 64 {
+		return false
+	}
+	for _, c := range ref {
+		if !strings.ContainsRune("0123456789abcdefABCDEF", c) {
+			return false
+		}
+	}
+	return true
 }
 
 // ChangeKind is what a merged pull request did to one file.
@@ -196,6 +243,7 @@ const (
 	OpRevert          = "revert pull request"
 	OpReadFile        = "read file"
 	OpListFiles       = "list files"
+	OpHead            = "read branch head"
 	OpMergedFiles     = "list merged files"
 )
 
@@ -227,7 +275,8 @@ var (
 	ErrNotMerged = errors.New("the pull request is not merged")
 	// ErrNothingToRevert: the merged pull request changed no files.
 	ErrNothingToRevert = errors.New("revert refused: the pull request changed no files")
-	// ErrFileNotFound: the branch carries no file at the path.
+	// ErrFileNotFound: the branch or commit carries no file at the path, or
+	// the commit SHA a read or a list names is not in the repository.
 	ErrFileNotFound = errors.New("no such file")
 )
 

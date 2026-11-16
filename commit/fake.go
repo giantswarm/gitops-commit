@@ -23,6 +23,7 @@ type Fake struct {
 	mu      sync.Mutex
 	heads   map[string]string     // repo#branch → head sha
 	commits map[string]FakeCommit // sha → commit
+	held    map[string]bool       // repo@sha → the repository has the commit
 	prs     []*FakePullRequest
 }
 
@@ -61,7 +62,7 @@ func (p *FakePullRequest) open() bool { return !p.Merged && !p.Closed }
 
 // NewFake returns an empty Fake; seed base branches with AddBranch.
 func NewFake() *Fake {
-	return &Fake{Fail: map[string]error{}, heads: map[string]string{}, commits: map[string]FakeCommit{}}
+	return &Fake{Fail: map[string]error{}, heads: map[string]string{}, commits: map[string]FakeCommit{}, held: map[string]bool{}}
 }
 
 // AddBranch seeds branch in repo with one commit holding files (nil for an empty tree).
@@ -291,34 +292,65 @@ func (f *Fake) commit(op string, repo Repository, branch, message string, files 
 	return nil
 }
 
+// Head implements HeadReader.
+func (f *Fake) Head(_ context.Context, repo Repository, branch string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.Fail[OpHead]; err != nil {
+		return "", err
+	}
+	sha, ok := f.heads[key(repo, branch)]
+	if !ok {
+		return "", fmt.Errorf("%s: %s has no branch %q", OpHead, repo, branch)
+	}
+	return sha, nil
+}
+
+// resolve is the commit ref names: a branch's head, or a commit of repo. A
+// ref shaped like a commit SHA that names neither is ErrFileNotFound, as on
+// GitHub; any other unknown ref names a missing branch. The caller holds the
+// lock.
+func (f *Fake) resolve(op string, repo Repository, ref string) (string, error) {
+	if sha, ok := f.heads[key(repo, ref)]; ok {
+		return sha, nil
+	}
+	if f.held[repo.String()+"@"+ref] {
+		return ref, nil
+	}
+	if isCommitSHA(ref) {
+		return "", fmt.Errorf("%s %s@%s: no such commit: %w", op, repo, ref, ErrFileNotFound)
+	}
+	return "", fmt.Errorf("%s: %s has no branch %q", op, repo, ref)
+}
+
 // ReadFile implements Reader.
-func (f *Fake) ReadFile(_ context.Context, repo Repository, branch, path string) ([]byte, error) {
+func (f *Fake) ReadFile(_ context.Context, repo Repository, ref, path string) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := f.Fail[OpReadFile]; err != nil {
 		return nil, err
 	}
-	sha, ok := f.heads[key(repo, branch)]
-	if !ok {
-		return nil, fmt.Errorf("%s: %s has no branch %q", OpReadFile, repo, branch)
+	sha, err := f.resolve(OpReadFile, repo, ref)
+	if err != nil {
+		return nil, err
 	}
 	content, ok := f.commits[sha].Files[path]
 	if !ok {
-		return nil, fmt.Errorf("%s %s/%s@%s: %w", OpReadFile, repo, path, branch, ErrFileNotFound)
+		return nil, fmt.Errorf("%s %s/%s@%s: %w", OpReadFile, repo, path, ref, ErrFileNotFound)
 	}
 	return slices.Clone(content), nil
 }
 
 // ListFiles implements Lister.
-func (f *Fake) ListFiles(_ context.Context, repo Repository, branch, dir string) ([]string, error) {
+func (f *Fake) ListFiles(_ context.Context, repo Repository, ref, dir string) ([]string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := f.Fail[OpListFiles]; err != nil {
 		return nil, err
 	}
-	sha, ok := f.heads[key(repo, branch)]
-	if !ok {
-		return nil, fmt.Errorf("%s: %s has no branch %q", OpListFiles, repo, branch)
+	sha, err := f.resolve(OpListFiles, repo, ref)
+	if err != nil {
+		return nil, err
 	}
 	var out []string
 	for p := range f.commits[sha].Files {
@@ -626,6 +658,7 @@ func (f *Fake) writeMerge(repo Repository, branch, message, parent, mergeParent 
 	}
 	sha := hex.EncodeToString(h.Sum(nil))[:40]
 	f.commits[sha] = FakeCommit{Repository: repo, Branch: branch, Message: message, Parent: parent, MergeParent: mergeParent, SHA: sha, Files: maps.Clone(tree)}
+	f.held[repo.String()+"@"+sha] = true
 	f.heads[key(repo, branch)] = sha
 }
 
