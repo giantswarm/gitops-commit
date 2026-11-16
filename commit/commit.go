@@ -230,6 +230,18 @@ type MergedFilesLister interface {
 	MergedFiles(ctx context.Context, pr PullRequest) ([]FileChange, error)
 }
 
+// PrefixFinder finds the open pull requests of a family of branches: what a
+// caller checks before it writes when each write gets its own branch, a
+// stable prefix and a suffix of its own, and a second write must wait while
+// a pull request of the family is open. GitHub and Fake implement it.
+type PrefixFinder interface {
+	// FindPullRequestsByPrefix returns every open pull request of repo whose
+	// head branch is in repo itself (never a fork's branch of that name) and
+	// starts with prefix, sorted by number; none when there is no such pull
+	// request. An empty prefix is ErrInvalidRequest.
+	FindPullRequestsByPrefix(ctx context.Context, repo Repository, prefix string) ([]PullRequest, error)
+}
+
 // Operation names of the remote calls, carried by AuthError and by Fake.Fail.
 const (
 	OpCreateBranch    = "create branch"
@@ -239,6 +251,7 @@ const (
 	OpMerge           = "merge"
 	OpApprove         = "approve pull request"
 	OpFindPullRequest = "find pull request"
+	OpFindByPrefix    = "find pull requests by prefix"
 	OpEnableAutoMerge = "enable auto-merge"
 	OpClose           = "close pull request"
 	OpRevert          = "revert pull request"
