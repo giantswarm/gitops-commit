@@ -214,3 +214,63 @@ func TestLiveRevertOntoAnExistingRevertBranch(t *testing.T) {
 	}
 	t.Logf("on %s: %s reverted twice on %s (%d behind %s, the first head %s plus %d commits); the third revert was refused: %v", target, merged.URL, revert.URL, onBase.GetBehindBy(), base, first, onFirst.GetAheadBy(), err)
 }
+
+// TestLiveReadsOneRevisionAtTheHeadItResolved lists and reads a directory at
+// a resolved head on a real repository, GITOPS_COMMIT_LIVE_REPO and
+// GITHUB_TOKEN as above, after a commit moved a file of it; and checks that
+// GitHub's answer for a commit it does not have is ErrFileNotFound. The
+// scratch branch gitops-commit-live/<random>/base is deleted at the end.
+func TestLiveReadsOneRevisionAtTheHeadItResolved(t *testing.T) {
+	target, token := os.Getenv("GITOPS_COMMIT_LIVE_REPO"), os.Getenv("GITHUB_TOKEN")
+	if target == "" || token == "" {
+		t.Skip("set GITOPS_COMMIT_LIVE_REPO=owner/name and GITHUB_TOKEN to run against a real repository")
+	}
+	owner, name, ok := strings.Cut(target, "/")
+	if !ok {
+		t.Fatalf("GITOPS_COMMIT_LIVE_REPO = %q, want owner/name", target)
+	}
+	repo := Repository{Owner: owner, Name: name}
+	gh, err := NewGitHub(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	settings, _, err := gh.gh.Repositories.Get(ctx, owner, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix := "gitops-commit-live/" + strings.ToLower(rand.Text()[:8])
+	base, dir := prefix+"/base", prefix
+	t.Cleanup(func() {
+		if _, err := gh.gh.Git.DeleteRef(ctx, owner, name, headsPrefix+base); err != nil {
+			t.Logf("deleting %s: %v", base, err)
+		}
+	})
+	if err := gh.CreateBranch(ctx, repo, base, settings.GetDefaultBranch()); err != nil {
+		t.Fatal(err)
+	}
+	if err := gh.Commit(ctx, repo, base, "the first revision", map[string][]byte{dir + "/a.yaml": []byte("a\n")}); err != nil {
+		t.Fatal(err)
+	}
+	sha, err := gh.Head(ctx, repo, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := gh.Commit(ctx, repo, base, "the file moves", map[string][]byte{dir + "/a.yaml": nil, dir + "/moved/a.yaml": []byte("a\n")}); err != nil {
+		t.Fatal(err)
+	}
+	paths, err := gh.ListFiles(ctx, repo, sha, dir)
+	if err != nil || strings.Join(paths, ",") != dir+"/a.yaml" {
+		t.Fatalf("ListFiles at %s = %q, %v; want the first revision's file", sha, paths, err)
+	}
+	if got, err := gh.ReadFile(ctx, repo, sha, paths[0]); err != nil || string(got) != "a\n" {
+		t.Errorf("ReadFile at %s = %q, %v", sha, got, err)
+	}
+	missing := strings.Repeat("0", 40)
+	if _, err := gh.ListFiles(ctx, repo, missing, dir); !errors.Is(err, ErrFileNotFound) {
+		t.Errorf("ListFiles at a missing commit: want ErrFileNotFound, got %v", err)
+	}
+	if _, err := gh.ReadFile(ctx, repo, missing, dir+"/a.yaml"); !errors.Is(err, ErrFileNotFound) {
+		t.Errorf("ReadFile at a missing commit: want ErrFileNotFound, got %v", err)
+	}
+}

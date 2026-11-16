@@ -15,12 +15,13 @@
 // reads after it can see two revisions when a commit lands between them: a
 // file the commit moved reads as ErrFileNotFound, and its new path is not in
 // the list. To read one consistent revision, resolve the head once and pass
-// the SHA to every call:
+// the SHA to every call. gh is a value that implements HeadReader, Lister and
+// Reader, such as *GitHub or *Fake (Remote has none of the three):
 //
-//	sha, err := remote.Head(ctx, repo, "main")
-//	paths, err := remote.ListFiles(ctx, repo, sha, dir)
+//	sha, err := gh.Head(ctx, repo, "main")
+//	paths, err := gh.ListFiles(ctx, repo, sha, dir)
 //	for _, p := range paths {
-//		content, err := remote.ReadFile(ctx, repo, sha, p)
+//		content, err := gh.ReadFile(ctx, repo, sha, p)
 //	}
 package commit
 
@@ -174,10 +175,10 @@ type HeadReader interface {
 }
 
 // isCommitSHA reports whether ref has the shape of a full commit SHA: 40
-// hexadecimal digits (SHA-1) or 64 (SHA-256). A ref of that shape that names
-// no branch and no commit is a missing commit, ErrFileNotFound.
+// hexadecimal digits. A ref of that shape that names no branch and no commit
+// is a missing commit, ErrFileNotFound.
 func isCommitSHA(ref string) bool {
-	if len(ref) != 40 && len(ref) != 64 {
+	if len(ref) != 40 {
 		return false
 	}
 	for _, c := range ref {

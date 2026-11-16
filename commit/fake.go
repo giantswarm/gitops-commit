@@ -82,6 +82,7 @@ func (f *Fake) Commits(repo Repository, branch string) []FakeCommit {
 		if c.Parent == "" {
 			break
 		}
+		c.Files = cloneTree(c.Files)
 		out = append(out, c)
 		sha = c.Parent
 	}
@@ -93,7 +94,7 @@ func (f *Fake) Commits(repo Repository, branch string) []FakeCommit {
 func (f *Fake) Files(repo Repository, branch string) map[string][]byte {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return maps.Clone(f.commits[f.heads[key(repo, branch)]].Files)
+	return cloneTree(f.commits[f.heads[key(repo, branch)]].Files)
 }
 
 // PullRequests returns every pull request the Fake holds, oldest first.
@@ -657,9 +658,23 @@ func (f *Fake) writeMerge(repo Repository, branch, message, parent, mergeParent 
 		h.Write(tree[path])
 	}
 	sha := hex.EncodeToString(h.Sum(nil))[:40]
-	f.commits[sha] = FakeCommit{Repository: repo, Branch: branch, Message: message, Parent: parent, MergeParent: mergeParent, SHA: sha, Files: maps.Clone(tree)}
+	f.commits[sha] = FakeCommit{Repository: repo, Branch: branch, Message: message, Parent: parent, MergeParent: mergeParent, SHA: sha, Files: cloneTree(tree)}
 	f.held[repo.String()+"@"+sha] = true
 	f.heads[key(repo, branch)] = sha
+}
+
+// cloneTree copies a tree and every file's content, so a commit the Fake
+// holds never shares a buffer with its caller: a buffer the caller changes
+// later does not change what a commit SHA reads.
+func cloneTree(tree map[string][]byte) map[string][]byte {
+	if tree == nil {
+		return nil
+	}
+	out := make(map[string][]byte, len(tree))
+	for path, content := range tree {
+		out[path] = slices.Clone(content)
+	}
+	return out
 }
 
 func key(repo Repository, branch string) string { return repo.String() + "#" + branch }

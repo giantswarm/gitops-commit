@@ -487,6 +487,24 @@ func TestFakeReadsOneRevisionAtTheHeadItResolved(t *testing.T) {
 	}
 }
 
+func TestFakeCommitKeepsItsContentWhenTheCallerReusesTheBuffer(t *testing.T) {
+	f := NewFake()
+	buf := []byte("first")
+	f.AddBranch(repoA, mainBranch, map[string][]byte{oneFile: buf})
+	ctx := context.Background()
+	sha, err := f.Head(ctx, repoA, mainBranch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	copy(buf, "later")
+	if err := f.Commit(ctx, repoA, mainBranch, "reuse", map[string][]byte{oneFile: buf}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := f.ReadFile(ctx, repoA, sha, oneFile); err != nil || string(got) != "first" {
+		t.Errorf("ReadFile at the resolved commit = %q, %v; want first", got, err)
+	}
+}
+
 func TestFakeReadAtAMissingCommitIsNotFound(t *testing.T) {
 	f := NewFake()
 	f.AddBranch(repoA, mainBranch, map[string][]byte{readme: []byte("a")})
